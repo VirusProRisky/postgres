@@ -2,7 +2,7 @@
  *
  * pg_dumpall.c
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * pg_dumpall forces all pg_dump output to be text, since it also outputs
@@ -949,14 +949,15 @@ static void
 dumpRoleMembership(PGconn *conn)
 {
 	PQExpBuffer buf = createPQExpBuffer();
-	PQExpBuffer	optbuf = createPQExpBuffer();
+	PQExpBuffer optbuf = createPQExpBuffer();
 	PGresult   *res;
 	int			start = 0,
 				end,
 				total;
 	bool		dump_grantors;
-	bool		dump_inherit_option;
+	bool		dump_grant_options;
 	int			i_inherit_option;
+	int			i_set_option;
 
 	/*
 	 * Previous versions of PostgreSQL didn't used to track the grantor very
@@ -968,10 +969,9 @@ dumpRoleMembership(PGconn *conn)
 	dump_grantors = (PQserverVersion(conn) >= 160000);
 
 	/*
-	 * Previous versions of PostgreSQL also did not have a grant-level
-	 * INHERIT option.
+	 * Previous versions of PostgreSQL also did not have grant-level options.
 	 */
-	dump_inherit_option = (server_version >= 160000);
+	dump_grant_options = (server_version >= 160000);
 
 	/* Generate and execute query. */
 	printfPQExpBuffer(buf, "SELECT ur.rolname AS role, "
@@ -979,8 +979,8 @@ dumpRoleMembership(PGconn *conn)
 					  "ug.oid AS grantorid, "
 					  "ug.rolname AS grantor, "
 					  "a.admin_option");
-	if (dump_inherit_option)
-		appendPQExpBufferStr(buf, ", a.inherit_option");
+	if (dump_grant_options)
+		appendPQExpBufferStr(buf, ", a.inherit_option, a.set_option");
 	appendPQExpBuffer(buf, " FROM pg_auth_members a "
 					  "LEFT JOIN %s ur on ur.oid = a.roleid "
 					  "LEFT JOIN %s um on um.oid = a.member "
@@ -989,23 +989,24 @@ dumpRoleMembership(PGconn *conn)
 					  "ORDER BY 1,2,4", role_catalog, role_catalog, role_catalog);
 	res = executeQuery(conn, buf->data);
 	i_inherit_option = PQfnumber(res, "inherit_option");
+	i_set_option = PQfnumber(res, "set_option");
 
 	if (PQntuples(res) > 0)
 		fprintf(OPF, "--\n-- Role memberships\n--\n\n");
 
 	/*
-	 * We can't dump these GRANT commands in arbitary order, because a role
-	 * that is named as a grantor must already have ADMIN OPTION on the
-	 * role for which it is granting permissions, except for the boostrap
+	 * We can't dump these GRANT commands in arbitrary order, because a role
+	 * that is named as a grantor must already have ADMIN OPTION on the role
+	 * for which it is granting permissions, except for the bootstrap
 	 * superuser, who can always be named as the grantor.
 	 *
 	 * We handle this by considering these grants role by role. For each role,
-	 * we initially consider the only allowable grantor to be the boostrap
+	 * we initially consider the only allowable grantor to be the bootstrap
 	 * superuser. Every time we grant ADMIN OPTION on the role to some user,
 	 * that user also becomes an allowable grantor. We make repeated passes
 	 * over the grants for the role, each time dumping those whose grantors
-	 * are allowable and which we haven't done yet. Eventually this should
-	 * let us dump all the grants.
+	 * are allowable and which we haven't done yet. Eventually this should let
+	 * us dump all the grants.
 	 */
 	total = PQntuples(res);
 	while (start < total)
@@ -1020,7 +1021,7 @@ dumpRoleMembership(PGconn *conn)
 		/* All memberships for a single role should be adjacent. */
 		for (end = start; end < total; ++end)
 		{
-			char   *otherrole;
+			char	   *otherrole;
 
 			otherrole = PQgetvalue(res, end, 0);
 			if (strcmp(role, otherrole) != 0)
@@ -1033,7 +1034,7 @@ dumpRoleMembership(PGconn *conn)
 		ht = rolename_create(remaining, NULL);
 
 		/*
-		 * Make repeated passses over the grants for this role until all have
+		 * Make repeated passes over the grants for this role until all have
 		 * been dumped.
 		 */
 		while (remaining > 0)
@@ -1051,6 +1052,7 @@ dumpRoleMembership(PGconn *conn)
 				PQfinish(conn);
 				exit_nicely(1);
 			}
+			prev_remaining = remaining;
 
 			/* Make one pass over the grants for this role. */
 			for (i = start; i < end; ++i)
@@ -1059,6 +1061,7 @@ dumpRoleMembership(PGconn *conn)
 				char	   *admin_option;
 				char	   *grantorid;
 				char	   *grantor;
+				char	   *set_option = "true";
 				bool		found;
 
 				/* If we already did this grant, don't do it again. */
@@ -1069,6 +1072,8 @@ dumpRoleMembership(PGconn *conn)
 				grantorid = PQgetvalue(res, i, 2);
 				grantor = PQgetvalue(res, i, 3);
 				admin_option = PQgetvalue(res, i, 4);
+				if (dump_grant_options)
+					set_option = PQgetvalue(res, i, i_set_option);
 
 				/*
 				 * If we're not dumping grantors or if the grantor is the
@@ -1098,9 +1103,9 @@ dumpRoleMembership(PGconn *conn)
 				fprintf(OPF, " TO %s", fmtId(member));
 				if (*admin_option == 't')
 					appendPQExpBufferStr(optbuf, "ADMIN OPTION");
-				if (dump_inherit_option)
+				if (dump_grant_options)
 				{
-					char   *inherit_option;
+					char	   *inherit_option;
 
 					if (optbuf->data[0] != '\0')
 						appendPQExpBufferStr(optbuf, ", ");
@@ -1108,6 +1113,12 @@ dumpRoleMembership(PGconn *conn)
 					appendPQExpBuffer(optbuf, "INHERIT %s",
 									  *inherit_option == 't' ?
 									  "TRUE" : "FALSE");
+				}
+				if (*set_option != 't')
+				{
+					if (optbuf->data[0] != '\0')
+						appendPQExpBufferStr(optbuf, ", ");
+					appendPQExpBuffer(optbuf, "SET FALSE");
 				}
 				if (optbuf->data[0] != '\0')
 					fprintf(OPF, " WITH %s", optbuf->data);
@@ -1905,7 +1916,7 @@ dumpTimestamp(const char *msg)
 }
 
 /*
- * Helper function for rolenamehash hash table.
+ * Helper function for rolename_hash hash table.
  */
 static uint32
 hash_string_pointer(char *s)

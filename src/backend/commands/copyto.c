@@ -3,7 +3,7 @@
  * copyto.c
  *		COPY <table> TO file/program/client
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -524,8 +524,8 @@ BeginCopyTo(ParseState *pstate,
 		/*
 		 * With row-level security and a user using "COPY relation TO", we
 		 * have to convert the "COPY relation TO" to a query-based COPY (eg:
-		 * "COPY (SELECT * FROM relation) TO"), to allow the rewriter to add
-		 * in any RLS clauses.
+		 * "COPY (SELECT * FROM ONLY relation) TO"), to allow the rewriter to
+		 * add in any RLS clauses.
 		 *
 		 * When this happens, we are passed in the relid of the originally
 		 * found relation (which we have locked).  As the planner will look up
@@ -883,7 +883,7 @@ DoCopyTo(CopyToState cstate)
 	else
 	{
 		/* run the plan --- the dest receiver will send tuples */
-		ExecutorRun(cstate->queryDesc, ForwardScanDirection, 0L, true);
+		ExecutorRun(cstate->queryDesc, ForwardScanDirection, 0, true);
 		processed = ((DR_copy *) cstate->queryDesc->dest)->processed;
 	}
 

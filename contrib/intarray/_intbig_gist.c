@@ -32,8 +32,9 @@ _intbig_in(PG_FUNCTION_ARGS)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("_intbig_in() not implemented")));
-	PG_RETURN_DATUM(0);
+			 errmsg("cannot accept a value of type %s", "intbig_gkey")));
+
+	PG_RETURN_VOID();			/* keep compiler quiet */
 }
 
 Datum
@@ -41,8 +42,9 @@ _intbig_out(PG_FUNCTION_ARGS)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("_intbig_out() not implemented")));
-	PG_RETURN_DATUM(0);
+			 errmsg("cannot display a value of type %s", "intbig_gkey")));
+
+	PG_RETURN_VOID();			/* keep compiler quiet */
 }
 
 static GISTTYPE *
@@ -393,7 +395,7 @@ g_intbig_picksplit(PG_FUNCTION_ARGS)
 		size_beta = hemdist(datum_r, _j, siglen);
 		costvector[j - 1].cost = abs(size_alpha - size_beta);
 	}
-	qsort((void *) costvector, maxoff, sizeof(SPLITCOST), comparecost);
+	qsort(costvector, maxoff, sizeof(SPLITCOST), comparecost);
 
 	union_l = GETSIGN(datum_l);
 	union_r = GETSIGN(datum_r);
@@ -422,7 +424,7 @@ g_intbig_picksplit(PG_FUNCTION_ARGS)
 			if (ISALLTRUE(datum_l) || ISALLTRUE(_j))
 			{
 				if (!ISALLTRUE(datum_l))
-					memset((void *) union_l, 0xff, siglen);
+					memset(union_l, 0xff, siglen);
 			}
 			else
 			{
@@ -438,7 +440,7 @@ g_intbig_picksplit(PG_FUNCTION_ARGS)
 			if (ISALLTRUE(datum_r) || ISALLTRUE(_j))
 			{
 				if (!ISALLTRUE(datum_r))
-					memset((void *) union_r, 0xff, siglen);
+					memset(union_r, 0xff, siglen);
 			}
 			else
 			{

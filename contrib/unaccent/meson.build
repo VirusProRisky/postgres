@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 unaccent_sources = files(
   'unaccent.c',
 )
@@ -35,6 +37,6 @@ tests += {
     'sql': [
       'unaccent',
     ],
-    'regress_args': ['--encoding=UTF8'],
+    'regress_args': ['--encoding=UTF8', '--no-locale'],
   },
 }

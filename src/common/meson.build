@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 common_sources = files(
   'archive.c',
   'base64.c',
@@ -15,6 +17,7 @@ common_sources = files(
   'kwlookup.c',
   'link-canary.c',
   'md5_common.c',
+  'percentrepl.c',
   'pg_get_line.c',
   'pg_lzcompress.c',
   'pg_prng.c',
@@ -51,8 +54,8 @@ endif
 common_kwlist = custom_target('kwlist',
   input: files('../include/parser/kwlist.h'),
   output: 'kwlist_d.h',
-  command: [perl, '-I', '@SOURCE_ROOT@/src/tools', files('../tools/gen_keywordlist.pl'),
-      '--extern', '--output', '@OUTDIR@', '@INPUT@'])
+  depend_files: gen_kwlist_deps,
+  command: [gen_kwlist_cmd, '--extern'])
 generated_sources += common_kwlist
 common_sources += common_kwlist
 
@@ -64,9 +67,7 @@ ryu_sources = files(
 )
 ryu_cflags = []
 
-if using_declaration_after_statement_warning
-  ryu_cflags += ['-Wno-declaration-after-statement']
-endif
+ryu_cflags += cflags_no_decl_after_statement
 
 config_info_sources = files('config_info.c',)
 config_info_cflags = [

@@ -4,7 +4,7 @@
  *	  private declarations for GiST -- declarations related to the
  *	  internal implementation of GiST, not the public API
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/gist_private.h
@@ -440,8 +440,8 @@ extern XLogRecPtr gistXLogPageDelete(Buffer buffer,
 									 FullTransactionId xid, Buffer parentBuffer,
 									 OffsetNumber downlinkOffset);
 
-extern void gistXLogPageReuse(Relation rel, BlockNumber blkno,
-							  FullTransactionId latestRemovedXid);
+extern void gistXLogPageReuse(Relation rel, Relation heaprel, BlockNumber blkno,
+							  FullTransactionId deleteXid);
 
 extern XLogRecPtr gistXLogUpdate(Buffer buffer,
 								 OffsetNumber *todelete, int ntodelete,
@@ -449,7 +449,8 @@ extern XLogRecPtr gistXLogUpdate(Buffer buffer,
 								 Buffer leftchildbuf);
 
 extern XLogRecPtr gistXLogDelete(Buffer buffer, OffsetNumber *todelete,
-								 int ntodelete, TransactionId latestRemovedXid);
+								 int ntodelete, TransactionId snapshotConflictHorizon,
+								 Relation heaprel);
 
 extern XLogRecPtr gistXLogSplit(bool page_is_leaf,
 								SplitedPageLayout *dist,
@@ -485,7 +486,7 @@ extern bool gistproperty(Oid index_oid, int attno,
 extern bool gistfitpage(IndexTuple *itvec, int len);
 extern bool gistnospace(Page page, IndexTuple *itvec, int len, OffsetNumber todelete, Size freespace);
 extern void gistcheckpage(Relation rel, Buffer buf);
-extern Buffer gistNewBuffer(Relation r);
+extern Buffer gistNewBuffer(Relation r, Relation heaprel);
 extern bool gistPageRecyclable(Page page);
 extern void gistfillbuffer(Page page, IndexTuple *itup, int len,
 						   OffsetNumber off);
@@ -549,7 +550,6 @@ extern void gistSplitByKey(Relation r, Page page, IndexTuple *itup,
 /* gistbuild.c */
 extern IndexBuildResult *gistbuild(Relation heap, Relation index,
 								   struct IndexInfo *indexInfo);
-extern void gistValidateBufferingOption(const char *value);
 
 /* gistbuildbuffers.c */
 extern GISTBuildBuffers *gistInitBuildBuffers(int pagesPerBuffer, int levelStep,

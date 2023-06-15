@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 backend_sources += files(
   'backend_progress.c',
   'backend_status.c',
@@ -7,6 +9,7 @@ backend_sources += files(
   'pgstat_checkpointer.c',
   'pgstat_database.c',
   'pgstat_function.c',
+  'pgstat_io.c',
   'pgstat_relation.c',
   'pgstat_replslot.c',
   'pgstat_shmem.c',

@@ -3,7 +3,7 @@
  * Assorted utility functions to work on files.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/common/file_utils.h
@@ -44,6 +44,6 @@ extern ssize_t pg_pwritev_with_retry(int fd,
 									 int iovcnt,
 									 off_t offset);
 
-extern ssize_t pg_pwrite_zeros(int fd, size_t size);
+extern ssize_t pg_pwrite_zeros(int fd, size_t size, off_t offset);
 
 #endif							/* FILE_UTILS_H */

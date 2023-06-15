@@ -1,10 +1,14 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 backend_build_deps = [backend_code]
 backend_sources = []
 backend_link_with = [pgport_srv, common_srv]
 
 generated_backend_sources = []
+post_export_backend_sources = []
 
 subdir('access')
+subdir('archive')
 subdir('backup')
 subdir('bootstrap')
 subdir('catalog')
@@ -130,8 +134,15 @@ if dtrace.found() and host_system != 'darwin'
   )
 endif
 
+if host_system == 'windows'
+  post_export_backend_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
+    '--NAME', 'postgres',
+    '--FILEDESC', 'PostgreSQL Server',])
+endif
+
 postgres = executable('postgres',
   backend_input,
+  sources: post_export_backend_sources,
   objects: backend_objs,
   link_args: backend_link_args,
   link_with: backend_link_with,
@@ -177,10 +188,17 @@ backend_mod_code = declare_dependency(
   dependencies: backend_mod_deps,
 )
 
+# normal extension modules
 pg_mod_args = default_mod_args + {
   'dependencies': [backend_mod_code],
   'cpp_args': pg_mod_cpp_args,
   'link_depends': pg_mod_link_depend,
+}
+
+# extension modules that shouldn't be installed by default, as they're only
+# for testing
+pg_test_mod_args = pg_mod_args + {
+  'install': false
 }
 
 

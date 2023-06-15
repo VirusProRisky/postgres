@@ -35,7 +35,7 @@
  * stack is empty.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -1630,7 +1630,7 @@ ThereAreNoPriorRegisteredSnapshots(void)
 }
 
 /*
- * HaveRegisteredOrActiveSnapshots
+ * HaveRegisteredOrActiveSnapshot
  *		Is there any registered or active snapshot?
  *
  * NB: Unless pushed or active, the cached catalog snapshot will not cause
@@ -1990,7 +1990,7 @@ MaintainOldSnapshotTimeMapping(TimestampTz whenTaken, TransactionId xmin)
 		int			bucket = (oldSnapshotControl->head_offset
 							  + ((ts - oldSnapshotControl->head_timestamp)
 								 / USECS_PER_MINUTE))
-		% OLD_SNAPSHOT_TIME_MAP_ENTRIES;
+			% OLD_SNAPSHOT_TIME_MAP_ENTRIES;
 
 		if (TransactionIdPrecedes(oldSnapshotControl->xid_by_minute[bucket], xmin))
 			oldSnapshotControl->xid_by_minute[bucket] = xmin;
@@ -2057,7 +2057,7 @@ MaintainOldSnapshotTimeMapping(TimestampTz whenTaken, TransactionId xmin)
 					/* Extend map to unused entry. */
 					int			new_tail = (oldSnapshotControl->head_offset
 											+ oldSnapshotControl->count_used)
-					% OLD_SNAPSHOT_TIME_MAP_ENTRIES;
+						% OLD_SNAPSHOT_TIME_MAP_ENTRIES;
 
 					oldSnapshotControl->count_used++;
 					oldSnapshotControl->xid_by_minute[new_tail] = xmin;
@@ -2188,7 +2188,7 @@ SerializeSnapshot(Snapshot snapshot, char *start_address)
 	if (serialized_snapshot.subxcnt > 0)
 	{
 		Size		subxipoff = sizeof(SerializedSnapshotData) +
-		snapshot->xcnt * sizeof(TransactionId);
+			snapshot->xcnt * sizeof(TransactionId);
 
 		memcpy((TransactionId *) (start_address + subxipoff),
 			   snapshot->subxip, snapshot->subxcnt * sizeof(TransactionId));
@@ -2345,7 +2345,7 @@ XidInMVCCSnapshot(TransactionId xid, Snapshot snapshot)
 	else
 	{
 		/*
-		 * In recovery we store all xids in the subxact array because it is by
+		 * In recovery we store all xids in the subxip array because it is by
 		 * far the bigger array, and we mostly don't know which xids are
 		 * top-level and which are subxacts. The xip array is empty.
 		 *

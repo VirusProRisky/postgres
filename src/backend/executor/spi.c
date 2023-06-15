@@ -3,7 +3,7 @@
  * spi.c
  *				Server Programming Interface
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -432,7 +432,7 @@ AtEOXact_SPI(bool isCommit)
 
 	/*
 	 * Pop stack entries, stopping if we find one marked internal_xact (that
-	 * one belongs to the caller of SPI_commit or SPI_abort).
+	 * one belongs to the caller of SPI_commit or SPI_rollback).
 	 */
 	while (_SPI_connected >= 0)
 	{
@@ -2029,6 +2029,10 @@ SPI_result_code_string(int code)
 			return "SPI_OK_REL_REGISTER";
 		case SPI_OK_REL_UNREGISTER:
 			return "SPI_OK_REL_UNREGISTER";
+		case SPI_OK_TD_REGISTER:
+			return "SPI_OK_TD_REGISTER";
+		case SPI_OK_MERGE:
+			return "SPI_OK_MERGE";
 	}
 	/* Unrecognized code ... return something useful ... */
 	sprintf(buf, "Unrecognized SPI code %d", code);
@@ -3341,7 +3345,7 @@ SPI_register_trigger_data(TriggerData *tdata)
 	if (tdata->tg_newtable)
 	{
 		EphemeralNamedRelation enr =
-		palloc(sizeof(EphemeralNamedRelationData));
+			palloc(sizeof(EphemeralNamedRelationData));
 		int			rc;
 
 		enr->md.name = tdata->tg_trigger->tgnewtable;
@@ -3358,7 +3362,7 @@ SPI_register_trigger_data(TriggerData *tdata)
 	if (tdata->tg_oldtable)
 	{
 		EphemeralNamedRelation enr =
-		palloc(sizeof(EphemeralNamedRelationData));
+			palloc(sizeof(EphemeralNamedRelationData));
 		int			rc;
 
 		enr->md.name = tdata->tg_trigger->tgoldtable;

@@ -1,4 +1,4 @@
-# FIXME: prevent install during main install, but not during test :/
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
 
 test_worker_spi_sources = files(
   'worker_spi.c',
@@ -12,14 +12,13 @@ endif
 
 test_worker_spi = shared_module('worker_spi',
   test_worker_spi_sources,
-  kwargs: pg_mod_args,
+  kwargs: pg_test_mod_args,
 )
-testprep_targets += test_worker_spi
+test_install_libs += test_worker_spi
 
-install_data(
+test_install_data += files(
   'worker_spi.control',
   'worker_spi--1.0.sql',
-  kwargs: contrib_data_args,
 )
 
 tests += {
@@ -30,6 +29,8 @@ tests += {
     'sql': [
       'worker_spi',
     ],
-    'regress_args': ['--temp-config', files('dynamic.conf'), '--dbname=contrib_regression'],
+    'dbname': 'contrib_regression',
+    'regress_args': ['--temp-config', files('dynamic.conf')],
+    'runningcheck': false,
   },
 }

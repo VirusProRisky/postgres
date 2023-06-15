@@ -3,7 +3,7 @@
  * foreign.c
  *		  support for foreign-data wrappers, servers and user mappings.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/backend/foreign/foreign.c
@@ -574,6 +574,7 @@ static const struct ConnectionOption libpq_conninfo_options[] = {
 	{"requiressl", ForeignServerRelationId},
 	{"sslmode", ForeignServerRelationId},
 	{"gsslib", ForeignServerRelationId},
+	{"gssdelegation", ForeignServerRelationId},
 	{NULL, InvalidOid}
 };
 

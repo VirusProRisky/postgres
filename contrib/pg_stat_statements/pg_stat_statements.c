@@ -34,7 +34,7 @@
  * in the file to be read or written while holding only shared lock.
  *
  *
- * Copyright (c) 2008-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2008-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/pg_stat_statements/pg_stat_statements.c
@@ -55,6 +55,7 @@
 #include "jit/jit.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/queryjumble.h"
 #include "optimizer/planner.h"
 #include "parser/analyze.h"
 #include "parser/parsetree.h"
@@ -69,7 +70,6 @@
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
-#include "utils/queryjumble.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
 
@@ -836,8 +836,10 @@ pgss_post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate)
 	if (query->utilityStmt)
 	{
 		if (pgss_track_utility && !PGSS_HANDLED_UTILITY(query->utilityStmt))
+		{
 			query->queryId = UINT64CONST(0);
-		return;
+			return;
+		}
 	}
 
 	/*
@@ -1058,7 +1060,7 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 				   queryDesc->plannedstmt->stmt_len,
 				   PGSS_EXEC,
 				   queryDesc->totaltime->total * 1000.0,	/* convert to msec */
-				   queryDesc->estate->es_processed,
+				   queryDesc->estate->es_total_processed,
 				   &queryDesc->totaltime->bufusage,
 				   &queryDesc->totaltime->walusage,
 				   queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL,

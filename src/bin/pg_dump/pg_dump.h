@@ -3,7 +3,7 @@
  * pg_dump.h
  *	  Common header file for the pg_dump utility
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/pg_dump/pg_dump.h
@@ -72,8 +72,8 @@ typedef enum
 	DO_FOREIGN_SERVER,
 	DO_DEFAULT_ACL,
 	DO_TRANSFORM,
-	DO_BLOB,
-	DO_BLOB_DATA,
+	DO_LARGE_OBJECT,
+	DO_LARGE_OBJECT_DATA,
 	DO_PRE_DATA_BOUNDARY,
 	DO_POST_DATA_BOUNDARY,
 	DO_EVENT_TRIGGER,
@@ -227,6 +227,7 @@ typedef struct _funcInfo
 	int			nargs;
 	Oid		   *argtypes;
 	Oid			prorettype;
+	bool		postponed_def;	/* function must be postponed into post-data */
 } FuncInfo;
 
 /* AggInfo is a superset of FuncInfo */
@@ -318,6 +319,10 @@ typedef struct _tableInfo
 	bool		dummy_view;		/* view's real definition must be postponed */
 	bool		postponed_def;	/* matview must be postponed into post-data */
 	bool		ispartition;	/* is table a partition? */
+	bool		unsafe_partitions;	/* is it an unsafe partitioned table? */
+
+	int			numParents;		/* number of (immediate) parent tables */
+	struct _tableInfo **parents;	/* TableInfos of immediate parents */
 
 	/*
 	 * These fields are computed only if we decide the table is interesting
@@ -326,7 +331,6 @@ typedef struct _tableInfo
 	int			numatts;		/* number of attributes */
 	char	  **attnames;		/* the attribute names */
 	char	  **atttypnames;	/* attribute type names */
-	int		   *atttypmod;		/* type-specific type modifiers */
 	int		   *attstattarget;	/* attribute statistics targets */
 	char	   *attstorage;		/* attribute storage scheme */
 	char	   *typstorage;		/* type storage scheme */
@@ -351,8 +355,6 @@ typedef struct _tableInfo
 	/*
 	 * Stuff computed only for dumpable tables.
 	 */
-	int			numParents;		/* number of (immediate) parent tables */
-	struct _tableInfo **parents;	/* TableInfos of immediate parents */
 	int			numIndexes;		/* number of indexes */
 	struct _indxInfo *indexes;	/* indexes */
 	struct _tableDataInfo *dataObj; /* TableDataInfo, if dumping its data */
@@ -582,12 +584,12 @@ typedef struct _defaultACLInfo
 	char		defaclobjtype;
 } DefaultACLInfo;
 
-typedef struct _blobInfo
+typedef struct _loInfo
 {
 	DumpableObject dobj;
 	DumpableAcl dacl;
 	const char *rolname;
-} BlobInfo;
+} LoInfo;
 
 /*
  * The PolicyInfo struct is used to represent policies on a table and
@@ -662,6 +664,7 @@ typedef struct _SubscriptionInfo
 	char	   *suborigin;
 	char	   *subsynccommit;
 	char	   *subpublications;
+	char	   *subpasswordrequired;
 } SubscriptionInfo;
 
 /*
@@ -715,6 +718,7 @@ extern ConvInfo *getConversions(Archive *fout, int *numConversions);
 extern TableInfo *getTables(Archive *fout, int *numTables);
 extern void getOwnedSeqs(Archive *fout, TableInfo tblinfo[], int numTables);
 extern InhInfo *getInherits(Archive *fout, int *numInherits);
+extern void getPartitioningInfo(Archive *fout);
 extern void getIndexes(Archive *fout, TableInfo tblinfo[], int numTables);
 extern void getExtendedStatistics(Archive *fout);
 extern void getConstraints(Archive *fout, TableInfo tblinfo[], int numTables);

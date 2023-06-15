@@ -4,7 +4,7 @@
  *	  POSTGRES generalized index access method definitions.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/genam.h
@@ -44,6 +44,7 @@ typedef struct IndexBuildResult
 typedef struct IndexVacuumInfo
 {
 	Relation	index;			/* the index being vacuumed */
+	Relation	heaprel;		/* the heap relation the index belongs to */
 	bool		analyze_only;	/* ANALYZE (without any actual vacuum) */
 	bool		report_progress;	/* emit progress.h status reports */
 	bool		estimated_count;	/* num_heap_tuples is an estimate */

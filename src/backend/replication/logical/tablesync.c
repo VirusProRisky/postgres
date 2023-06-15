@@ -2,7 +2,7 @@
  * tablesync.c
  *	  PostgreSQL logical replication: initial table data synchronization
  *
- * Copyright (c) 2012-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/logical/tablesync.c
@@ -14,7 +14,7 @@
  *	  The initial data synchronization is done separately for each table,
  *	  in a separate apply worker that only fetches the initial snapshot data
  *	  from the publisher and then synchronizes the position in the stream with
- *	  the main apply worker.
+ *	  the leader apply worker.
  *
  *	  There are several reasons for doing the synchronization this way:
  *	   - It allows us to parallelize the initial data synchronization
@@ -101,6 +101,7 @@
 #include "catalog/pg_type.h"
 #include "commands/copy.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "parser/parse_relation.h"
 #include "pgstat.h"
 #include "replication/logicallauncher.h"
@@ -119,6 +120,7 @@
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/usercontext.h"
 
 static bool table_states_valid = false;
 static List *table_states_not_ready = NIL;
@@ -153,7 +155,7 @@ finish_sync_worker(void)
 					get_rel_name(MyLogicalRepWorker->relid))));
 	CommitTransactionCommand();
 
-	/* Find the main apply worker and signal it. */
+	/* Find the leader apply worker and signal it. */
 	logicalrep_worker_wakeup(MyLogicalRepWorker->subid, InvalidOid);
 
 	/* Stop gracefully */
@@ -415,6 +417,7 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 	static HTAB *last_start_times = NULL;
 	ListCell   *lc;
 	bool		started_tx = false;
+	bool		should_exit = false;
 
 	Assert(!IsTransactionState());
 
@@ -444,28 +447,6 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 	{
 		hash_destroy(last_start_times);
 		last_start_times = NULL;
-	}
-
-	/*
-	 * Even when the two_phase mode is requested by the user, it remains as
-	 * 'pending' until all tablesyncs have reached READY state.
-	 *
-	 * When this happens, we restart the apply worker and (if the conditions
-	 * are still ok) then the two_phase tri-state will become 'enabled' at
-	 * that time.
-	 *
-	 * Note: If the subscription has no tables then leave the state as
-	 * PENDING, which allows ALTER SUBSCRIPTION ... REFRESH PUBLICATION to
-	 * work.
-	 */
-	if (MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_PENDING &&
-		AllTablesyncsReady())
-	{
-		ereport(LOG,
-				(errmsg("logical replication apply worker for subscription \"%s\" will restart so that two_phase can be enabled",
-						MySubscription->name)));
-
-		proc_exit(0);
 	}
 
 	/*
@@ -583,7 +564,7 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 				 * the lock.
 				 */
 				int			nsyncworkers =
-				logicalrep_sync_worker_count(MyLogicalRepWorker->subid);
+					logicalrep_sync_worker_count(MyLogicalRepWorker->subid);
 
 				/* Now safe to release the LWLock */
 				LWLockRelease(LogicalRepWorkerLock);
@@ -609,7 +590,8 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 												 MySubscription->oid,
 												 MySubscription->name,
 												 MyLogicalRepWorker->userid,
-												 rstate->relid);
+												 rstate->relid,
+												 DSM_HANDLE_INVALID);
 						hentry->last_start_time = now;
 					}
 				}
@@ -619,8 +601,43 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 
 	if (started_tx)
 	{
+		/*
+		 * Even when the two_phase mode is requested by the user, it remains
+		 * as 'pending' until all tablesyncs have reached READY state.
+		 *
+		 * When this happens, we restart the apply worker and (if the
+		 * conditions are still ok) then the two_phase tri-state will become
+		 * 'enabled' at that time.
+		 *
+		 * Note: If the subscription has no tables then leave the state as
+		 * PENDING, which allows ALTER SUBSCRIPTION ... REFRESH PUBLICATION to
+		 * work.
+		 */
+		if (MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_PENDING)
+		{
+			CommandCounterIncrement();	/* make updates visible */
+			if (AllTablesyncsReady())
+			{
+				ereport(LOG,
+						(errmsg("logical replication apply worker for subscription \"%s\" will restart so that two_phase can be enabled",
+								MySubscription->name)));
+				should_exit = true;
+			}
+		}
+
 		CommitTransactionCommand();
 		pgstat_report_stat(true);
+	}
+
+	if (should_exit)
+	{
+		/*
+		 * Reset the last-start time for this worker so that the launcher will
+		 * restart it without waiting for wal_retrieve_retry_interval.
+		 */
+		ApplyLauncherForgetWorkerStartTime(MySubscription->oid);
+
+		proc_exit(0);
 	}
 }
 
@@ -630,6 +647,14 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 void
 process_syncing_tables(XLogRecPtr current_lsn)
 {
+	/*
+	 * Skip for parallel apply workers because they only operate on tables
+	 * that are in a READY state. See pa_can_start() and
+	 * should_apply_changes_for_rel().
+	 */
+	if (am_parallel_apply_worker())
+		return;
+
 	if (am_tablesync_worker())
 		process_syncing_tables_for_sync(current_lsn);
 	else
@@ -802,6 +827,7 @@ fetch_remote_table_info(char *nspname, char *relname,
 		TupleTableSlot *tslot;
 		Oid			attrsRow[] = {INT2VECTOROID};
 		StringInfoData pub_names;
+
 		initStringInfo(&pub_names);
 		foreach(lc, MySubscription->publications)
 		{
@@ -1066,6 +1092,7 @@ copy_table(Relation rel)
 	CopyFromState cstate;
 	List	   *attnamelist;
 	ParseState *pstate;
+	List	   *options = NIL;
 
 	/* Get the publisher relation info. */
 	fetch_remote_table_info(get_namespace_name(RelationGetNamespace(rel)),
@@ -1144,6 +1171,19 @@ copy_table(Relation rel)
 
 		appendStringInfoString(&cmd, ") TO STDOUT");
 	}
+
+	/*
+	 * Prior to v16, initial table synchronization will use text format even
+	 * if the binary option is enabled for a subscription.
+	 */
+	if (walrcv_server_version(LogRepWorkerWalRcvConn) >= 160000 &&
+		MySubscription->binary)
+	{
+		appendStringInfoString(&cmd, " WITH (FORMAT binary)");
+		options = list_make1(makeDefElem("format",
+										 (Node *) makeString("binary"), -1));
+	}
+
 	res = walrcv_exec(LogRepWorkerWalRcvConn, cmd.data, 0, NULL);
 	pfree(cmd.data);
 	if (res->status != WALRCV_OK_COPY_OUT)
@@ -1160,7 +1200,7 @@ copy_table(Relation rel)
 										 NULL, false, false);
 
 	attnamelist = make_copy_attnamelist(relmapentry);
-	cstate = BeginCopyFrom(pstate, rel, NULL, NULL, false, copy_read_data, attnamelist, NIL);
+	cstate = BeginCopyFrom(pstate, rel, NULL, NULL, false, copy_read_data, attnamelist, options);
 
 	/* Do the copy */
 	(void) CopyFrom(cstate);
@@ -1213,12 +1253,21 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 	WalRcvExecResult *res;
 	char		originname[NAMEDATALEN];
 	RepOriginId originid;
+	UserContext	ucxt;
+	bool		must_use_password;
+	bool		run_as_owner;
 
 	/* Check the state of the table synchronization. */
 	StartTransactionCommand();
 	relstate = GetSubscriptionRelState(MyLogicalRepWorker->subid,
 									   MyLogicalRepWorker->relid,
 									   &relstate_lsn);
+
+	/* Is the use of a password mandatory? */
+	must_use_password = MySubscription->passwordrequired &&
+		!superuser_arg(MySubscription->owner);
+
+	/* Note that the superuser_arg call can access the DB */
 	CommitTransactionCommand();
 
 	SpinLockAcquire(&MyLogicalRepWorker->relmutex);
@@ -1247,11 +1296,13 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 
 	/*
 	 * Here we use the slot name instead of the subscription name as the
-	 * application_name, so that it is different from the main apply worker,
+	 * application_name, so that it is different from the leader apply worker,
 	 * so that synchronous replication can distinguish them.
 	 */
 	LogRepWorkerWalRcvConn =
-		walrcv_connect(MySubscription->conninfo, true, slotname, &err);
+		walrcv_connect(MySubscription->conninfo, true,
+					   must_use_password,
+					   slotname, &err);
 	if (LogRepWorkerWalRcvConn == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
@@ -1295,7 +1346,7 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 		 * time this tablesync was launched.
 		 */
 		originid = replorigin_by_name(originname, false);
-		replorigin_session_setup(originid);
+		replorigin_session_setup(originid, 0);
 		replorigin_session_origin = originid;
 		*origin_startpos = replorigin_session_get_progress(false);
 
@@ -1329,6 +1380,71 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 	rel = table_open(MyLogicalRepWorker->relid, RowExclusiveLock);
 
 	/*
+	 * Start a transaction in the remote node in REPEATABLE READ mode.  This
+	 * ensures that both the replication slot we create (see below) and the
+	 * COPY are consistent with each other.
+	 */
+	res = walrcv_exec(LogRepWorkerWalRcvConn,
+					  "BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ",
+					  0, NULL);
+	if (res->status != WALRCV_OK_COMMAND)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("table copy could not start transaction on publisher: %s",
+						res->err)));
+	walrcv_clear_result(res);
+
+	/*
+	 * Create a new permanent logical decoding slot. This slot will be used
+	 * for the catchup phase after COPY is done, so tell it to use the
+	 * snapshot to make the final data consistent.
+	 */
+	walrcv_create_slot(LogRepWorkerWalRcvConn,
+					   slotname, false /* permanent */ , false /* two_phase */ ,
+					   CRS_USE_SNAPSHOT, origin_startpos);
+
+	/*
+	 * Setup replication origin tracking. The purpose of doing this before the
+	 * copy is to avoid doing the copy again due to any error in setting up
+	 * origin tracking.
+	 */
+	originid = replorigin_by_name(originname, true);
+	if (!OidIsValid(originid))
+	{
+		/*
+		 * Origin tracking does not exist, so create it now.
+		 *
+		 * Then advance to the LSN got from walrcv_create_slot. This is WAL
+		 * logged for the purpose of recovery. Locks are to prevent the
+		 * replication origin from vanishing while advancing.
+		 */
+		originid = replorigin_create(originname);
+
+		LockRelationOid(ReplicationOriginRelationId, RowExclusiveLock);
+		replorigin_advance(originid, *origin_startpos, InvalidXLogRecPtr,
+						   true /* go backward */ , true /* WAL log */ );
+		UnlockRelationOid(ReplicationOriginRelationId, RowExclusiveLock);
+
+		replorigin_session_setup(originid, 0);
+		replorigin_session_origin = originid;
+	}
+	else
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_OBJECT),
+				 errmsg("replication origin \"%s\" already exists",
+						originname)));
+	}
+
+	/*
+	 * Make sure that the copy command runs as the table owner, unless
+	 * the user has opted out of that behaviour.
+	 */
+	run_as_owner = MySubscription->runasowner;
+	if (!run_as_owner)
+		SwitchToUntrustedUser(rel->rd_rel->relowner, &ucxt);
+
+	/*
 	 * Check that our table sync worker has permission to insert into the
 	 * target table.
 	 */
@@ -1353,70 +1469,6 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 						GetUserNameFromId(GetUserId(), true),
 						RelationGetRelationName(rel))));
 
-	/*
-	 * Start a transaction in the remote node in REPEATABLE READ mode.  This
-	 * ensures that both the replication slot we create (see below) and the
-	 * COPY are consistent with each other.
-	 */
-	res = walrcv_exec(LogRepWorkerWalRcvConn,
-					  "BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ",
-					  0, NULL);
-	if (res->status != WALRCV_OK_COMMAND)
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("table copy could not start transaction on publisher: %s",
-						res->err)));
-	walrcv_clear_result(res);
-
-	/*
-	 * Create a new permanent logical decoding slot. This slot will be used
-	 * for the catchup phase after COPY is done, so tell it to use the
-	 * snapshot to make the final data consistent.
-	 *
-	 * Prevent cancel/die interrupts while creating slot here because it is
-	 * possible that before the server finishes this command, a concurrent
-	 * drop subscription happens which would complete without removing this
-	 * slot leading to a dangling slot on the server.
-	 */
-	HOLD_INTERRUPTS();
-	walrcv_create_slot(LogRepWorkerWalRcvConn,
-					   slotname, false /* permanent */ , false /* two_phase */ ,
-					   CRS_USE_SNAPSHOT, origin_startpos);
-	RESUME_INTERRUPTS();
-
-	/*
-	 * Setup replication origin tracking. The purpose of doing this before the
-	 * copy is to avoid doing the copy again due to any error in setting up
-	 * origin tracking.
-	 */
-	originid = replorigin_by_name(originname, true);
-	if (!OidIsValid(originid))
-	{
-		/*
-		 * Origin tracking does not exist, so create it now.
-		 *
-		 * Then advance to the LSN got from walrcv_create_slot. This is WAL
-		 * logged for the purpose of recovery. Locks are to prevent the
-		 * replication origin from vanishing while advancing.
-		 */
-		originid = replorigin_create(originname);
-
-		LockRelationOid(ReplicationOriginRelationId, RowExclusiveLock);
-		replorigin_advance(originid, *origin_startpos, InvalidXLogRecPtr,
-						   true /* go backward */ , true /* WAL log */ );
-		UnlockRelationOid(ReplicationOriginRelationId, RowExclusiveLock);
-
-		replorigin_session_setup(originid);
-		replorigin_session_origin = originid;
-	}
-	else
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_DUPLICATE_OBJECT),
-				 errmsg("replication origin \"%s\" already exists",
-						originname)));
-	}
-
 	/* Now do the initial data copy */
 	PushActiveSnapshot(GetTransactionSnapshot());
 	copy_table(rel);
@@ -1429,6 +1481,9 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 				 errmsg("table copy could not finish transaction on publisher: %s",
 						res->err)));
 	walrcv_clear_result(res);
+
+	if(!run_as_owner)
+		RestoreUserContext(&ucxt);
 
 	table_close(rel, NoLock);
 
@@ -1461,8 +1516,8 @@ copy_table_done:
 	SpinLockRelease(&MyLogicalRepWorker->relmutex);
 
 	/*
-	 * Finally, wait until the main apply worker tells us to catch up and then
-	 * return to let LogicalRepApplyLoop do it.
+	 * Finally, wait until the leader apply worker tells us to catch up and
+	 * then return to let LogicalRepApplyLoop do it.
 	 */
 	wait_for_worker_state_change(SUBREL_STATE_CATCHUP);
 	return slotname;
@@ -1517,7 +1572,7 @@ FetchTableStates(bool *started_tx)
 		 * Does the subscription have tables?
 		 *
 		 * If there were not-READY relations found then we know it does. But
-		 * if table_state_not_ready was empty we still need to check again to
+		 * if table_states_not_ready was empty we still need to check again to
 		 * see if there are 0 tables.
 		 */
 		has_subrels = (table_states_not_ready != NIL) ||

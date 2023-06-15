@@ -5,7 +5,7 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/streamutil.c
@@ -31,7 +31,7 @@
 
 #define ERRCODE_DUPLICATE_OBJECT  "42710"
 
-uint32		WalSegSz;
+int			WalSegSz;
 
 static bool RetrieveDataDirCreatePerm(PGconn *conn);
 

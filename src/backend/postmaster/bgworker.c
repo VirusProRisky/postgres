@@ -2,7 +2,7 @@
  * bgworker.c
  *		POSTGRES pluggable background workers implementation
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/postmaster/bgworker.c
@@ -128,6 +128,9 @@ static const struct
 	},
 	{
 		"ApplyWorkerMain", ApplyWorkerMain
+	},
+	{
+		"ParallelApplyWorkerMain", ParallelApplyWorkerMain
 	}
 };
 
@@ -723,7 +726,7 @@ SanityCheckBackgroundWorker(BackgroundWorker *worker, int elevel)
 static void
 bgworker_die(SIGNAL_ARGS)
 {
-	PG_SETMASK(&BlockSig);
+	sigprocmask(SIG_SETMASK, &BlockSig, NULL);
 
 	ereport(FATAL,
 			(errcode(ERRCODE_ADMIN_SHUTDOWN),

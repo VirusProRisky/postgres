@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 pgc_files = [
   'array',
   'binary',
@@ -23,6 +25,7 @@ pgc_files = [
   'quote',
   'show',
   'sqlda',
+  'sqljson',
   'twophase',
 ]
 

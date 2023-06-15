@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021-2022, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
@@ -7,7 +7,6 @@ use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
-use IPC::Run qw(pump finish timer);
 use Data::Dumper;
 
 # Do nothing unless Makefile has told us that the build is --with-readline.
@@ -40,7 +39,7 @@ $node->start;
 
 # set up a few database objects
 $node->safe_psql('postgres',
-	    "CREATE TABLE tab1 (c1 int primary key, c2 text);\n"
+		"CREATE TABLE tab1 (c1 int primary key, c2 text);\n"
 	  . "CREATE TABLE mytab123 (f1 int, f2 text);\n"
 	  . "CREATE TABLE mytab246 (f1 int, f2 text);\n"
 	  . "CREATE TABLE \"mixedName\" (f1 int, f2 text);\n"
@@ -72,7 +71,8 @@ delete $ENV{LS_COLORS};
 # completion tests is too variable.
 if ($ENV{TESTDATADIR})
 {
-	chdir $ENV{TESTDATADIR} or die "could not chdir to \"$ENV{TESTDATADIR}\": $!";
+	chdir $ENV{TESTDATADIR}
+	  or die "could not chdir to \"$ENV{TESTDATADIR}\": $!";
 }
 
 # Create some junk files for filename completion testing.
@@ -92,14 +92,7 @@ print $FH "other stuff\n";
 close $FH;
 
 # fire up an interactive psql session
-my $in  = '';
-my $out = '';
-
-my $timer = timer($PostgreSQL::Test::Utils::timeout_default);
-
-my $h = $node->interactive_psql('postgres', \$in, \$out, $timer);
-
-like($out, qr/psql/, "print startup banner");
+my $h = $node->interactive_psql('postgres');
 
 # Simple test case: type something and see if psql responds as expected
 sub check_completion
@@ -109,15 +102,12 @@ sub check_completion
 	# report test failures from caller location
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
 
-	# reset output collector
-	$out = "";
 	# restart per-command timer
-	$timer->start($PostgreSQL::Test::Utils::timeout_default);
-	# send the data to be sent
-	$in .= $send;
-	# wait ...
-	pump $h until ($out =~ $pattern || $timer->is_expired);
-	my $okay = ($out =~ $pattern && !$timer->is_expired);
+	$h->{timeout}->start($PostgreSQL::Test::Utils::timeout_default);
+
+	# send the data to be sent and wait for its result
+	my $out = $h->query_until($pattern, $send);
+	my $okay = ($out =~ $pattern && !$h->{timeout}->is_expired);
 	ok($okay, $annotation);
 	# for debugging, log actual output if it didn't match
 	local $Data::Dumper::Terse = 1;
@@ -342,8 +332,8 @@ clear_line();
 # check completion of a keyword offered in addition to object names;
 # such a keyword should obey COMP_KEYWORD_CASE
 foreach (
-	[ 'lower',          'CO', 'column' ],
-	[ 'upper',          'co', 'COLUMN' ],
+	[ 'lower', 'CO', 'column' ],
+	[ 'upper', 'co', 'COLUMN' ],
 	[ 'preserve-lower', 'co', 'column' ],
 	[ 'preserve-upper', 'CO', 'COLUMN' ],)
 {
@@ -442,11 +432,16 @@ check_completion("blarg \t\t", qr//, "check completion failure path");
 
 clear_query();
 
+# check COPY FROM with DEFAULT option
+check_completion(
+	"COPY foo FROM stdin WITH ( DEF\t)",
+	qr/DEFAULT /,
+	"COPY FROM with DEFAULT completion");
+
+clear_line();
+
 # send psql an explicit \q to shut it down, else pty won't close properly
-$timer->start($PostgreSQL::Test::Utils::timeout_default);
-$in .= "\\q\n";
-finish $h or die "psql returned $?";
-$timer->reset;
+$h->quit or die "psql returned $?";
 
 # done
 $node->stop;

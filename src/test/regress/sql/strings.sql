@@ -85,6 +85,12 @@ SELECT E'DeAdBeEf'::bytea;
 SELECT E'De\\000dBeEf'::bytea;
 SELECT E'De\\123dBeEf'::bytea;
 
+-- Test non-error-throwing API too
+SELECT pg_input_is_valid(E'\\xDeAdBeE', 'bytea');
+SELECT * FROM pg_input_error_info(E'\\xDeAdBeE', 'bytea');
+SELECT * FROM pg_input_error_info(E'\\xDeAdBeEx', 'bytea');
+SELECT * FROM pg_input_error_info(E'foo\\99bar', 'bytea');
+
 --
 -- test conversions between various string types
 -- E021-10 implicit casting among the character data types
@@ -781,6 +787,7 @@ SELECT ltrim('zzzytrim', 'xyz');
 
 SELECT translate('', '14', 'ax');
 SELECT translate('12345', '14', 'ax');
+SELECT translate('12345', '134', 'a');
 
 SELECT ascii('x');
 SELECT ascii('');

@@ -17,7 +17,7 @@
  * the backend's "backend/libpq" is quite separate from "interfaces/libpq".
  * All that remains is similarities of names to trap the unwary...
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/libpq/pqcomm.c
@@ -198,6 +198,13 @@ pq_init(void)
 	if (!pg_set_noblock(MyProcPort->sock))
 		ereport(COMMERROR,
 				(errmsg("could not set socket to nonblocking mode: %m")));
+#endif
+
+#ifndef WIN32
+
+	/* Don't give the socket to any subprograms we execute. */
+	if (fcntl(MyProcPort->sock, F_SETFD, FD_CLOEXEC) < 0)
+		elog(FATAL, "fcntl(F_SETFD) failed on socket: %m");
 #endif
 
 	FeBeWaitSet = CreateWaitEventSet(TopMemoryContext, FeBeWaitSetNEvents);
@@ -683,8 +690,7 @@ Setup_AF_UNIX(const char *sock_path)
  *		server port.  Set port->sock to the FD of the new connection.
  *
  * ASSUME: that this doesn't need to be non-blocking because
- *		the Postmaster uses select() to tell when the socket is ready for
- *		accept().
+ *		the Postmaster waits for the socket to be ready to accept().
  *
  * RETURNS: STATUS_OK or STATUS_ERROR
  */

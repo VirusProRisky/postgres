@@ -3,7 +3,7 @@
  * parse_func.c
  *		handle function calls in parser
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1632,7 +1632,6 @@ func_get_detail(List *funcname,
 		if (argdefaults && best_candidate->ndargs > 0)
 		{
 			Datum		proargdefaults;
-			bool		isnull;
 			char	   *str;
 			List	   *defaults;
 
@@ -1640,10 +1639,8 @@ func_get_detail(List *funcname,
 			if (best_candidate->ndargs > pform->pronargdefaults)
 				elog(ERROR, "not enough default arguments");
 
-			proargdefaults = SysCacheGetAttr(PROCOID, ftup,
-											 Anum_pg_proc_proargdefaults,
-											 &isnull);
-			Assert(!isnull);
+			proargdefaults = SysCacheGetAttrNotNull(PROCOID, ftup,
+													Anum_pg_proc_proargdefaults);
 			str = TextDatumGetCString(proargdefaults);
 			defaults = castNode(List, stringToNode(str));
 			pfree(str);

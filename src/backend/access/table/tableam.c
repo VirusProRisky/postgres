@@ -3,7 +3,7 @@
  * tableam.c
  *		Table access method routines too big to be inline functions.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -112,7 +112,7 @@ TableScanDesc
 table_beginscan_catalog(Relation relation, int nkeys, struct ScanKeyData *key)
 {
 	uint32		flags = SO_TYPE_SEQSCAN |
-	SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE | SO_TEMP_SNAPSHOT;
+		SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE | SO_TEMP_SNAPSHOT;
 	Oid			relid = RelationGetRelid(relation);
 	Snapshot	snapshot = RegisterSnapshot(GetCatalogSnapshot(relid));
 
@@ -176,7 +176,7 @@ table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan)
 {
 	Snapshot	snapshot;
 	uint32		flags = SO_TYPE_SEQSCAN |
-	SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
+		SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
 
 	Assert(RelationGetRelid(relation) == pscan->phs_relid);
 
@@ -345,7 +345,7 @@ void
 simple_table_tuple_update(Relation rel, ItemPointer otid,
 						  TupleTableSlot *slot,
 						  Snapshot snapshot,
-						  bool *update_indexes)
+						  TU_UpdateIndexes *update_indexes)
 {
 	TM_Result	result;
 	TM_FailureData tmfd;

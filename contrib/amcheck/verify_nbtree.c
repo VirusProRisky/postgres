@@ -14,7 +14,7 @@
  * that every visible heap tuple has a matching index tuple.
  *
  *
- * Copyright (c) 2017-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2017-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/amcheck/verify_nbtree.c
@@ -104,7 +104,7 @@ typedef struct BtreeCheckState
 
 	/*
 	 * The rightlink and incomplete split flag of block one level down to the
-	 * target page, which was visited last time via downlink from taget page.
+	 * target page, which was visited last time via downlink from target page.
 	 * We use it to check for missing downlinks.
 	 */
 	BlockNumber prevrightlink;
@@ -2694,7 +2694,7 @@ bt_rootdescend(BtreeCheckState *state, IndexTuple itup)
 	 */
 	Assert(state->readonly && state->rootdescend);
 	exists = false;
-	stack = _bt_search(state->rel, key, &lbuf, BT_READ, NULL);
+	stack = _bt_search(state->rel, NULL, key, &lbuf, BT_READ, NULL);
 
 	if (BufferIsValid(lbuf))
 	{

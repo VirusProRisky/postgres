@@ -59,7 +59,7 @@
  * counter does not fall within the wraparound horizon considering the global
  * minimum value.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/multixact.c
@@ -261,22 +261,24 @@ typedef struct MultiXactStateData
 	 * we compute it (using nextMXact if none are valid).  Each backend is
 	 * required not to attempt to access any SLRU data for MultiXactIds older
 	 * than its own OldestVisibleMXactId[] setting; this is necessary because
-	 * the checkpointer could truncate away such data at any instant.
+	 * the relevant SLRU data can be concurrently truncated away.
 	 *
 	 * The oldest valid value among all of the OldestMemberMXactId[] and
 	 * OldestVisibleMXactId[] entries is considered by vacuum as the earliest
-	 * possible value still having any live member transaction.  Subtracting
-	 * vacuum_multixact_freeze_min_age from that value we obtain the freezing
-	 * point for multixacts for that table.  Any value older than that is
-	 * removed from tuple headers (or "frozen"; see FreezeMultiXactId.  Note
-	 * that multis that have member xids that are older than the cutoff point
-	 * for xids must also be frozen, even if the multis themselves are newer
-	 * than the multixid cutoff point).  Whenever a full table vacuum happens,
-	 * the freezing point so computed is used as the new pg_class.relminmxid
-	 * value.  The minimum of all those values in a database is stored as
-	 * pg_database.datminmxid.  In turn, the minimum of all of those values is
-	 * stored in pg_control and used as truncation point for pg_multixact.  At
-	 * checkpoint or restartpoint, unneeded segments are removed.
+	 * possible value still having any live member transaction -- OldestMxact.
+	 * Any value older than that is typically removed from tuple headers, or
+	 * "frozen" via being replaced with a new xmax.  VACUUM can sometimes even
+	 * remove an individual MultiXact xmax whose value is >= its OldestMxact
+	 * cutoff, though typically only when no individual member XID is still
+	 * running.  See FreezeMultiXactId for full details.
+	 *
+	 * Whenever VACUUM advances relminmxid, then either its OldestMxact cutoff
+	 * or the oldest extant Multi remaining in the table is used as the new
+	 * pg_class.relminmxid value (whichever is earlier).  The minimum of all
+	 * relminmxid values in each database is stored in pg_database.datminmxid.
+	 * In turn, the minimum of all of those values is stored in pg_control.
+	 * This is used as the truncation point for pg_multixact when unneeded
+	 * segments get removed by vac_truncate_clog() during vacuuming.
 	 */
 	MultiXactId perBackendXactIds[FLEXIBLE_ARRAY_MEMBER];
 } MultiXactStateData;
@@ -667,8 +669,8 @@ MultiXactIdSetOldestMember(void)
  *
  * We set the OldestVisibleMXactId for a given transaction the first time
  * it's going to inspect any MultiXactId.  Once we have set this, we are
- * guaranteed that the checkpointer won't truncate off SLRU data for
- * MultiXactIds at or after our OldestVisibleMXactId.
+ * guaranteed that SLRU data for MultiXactIds >= our own OldestVisibleMXactId
+ * won't be truncated away.
  *
  * The value to set is the oldest of nextMXact and all the valid per-backend
  * OldestMemberMXactId[] entries.  Because of the locking we do, we can be
@@ -799,7 +801,8 @@ MultiXactIdCreateFromMembers(int nmembers, MultiXactMember *members)
 			if (ISUPDATE_from_mxstatus(members[i].status))
 			{
 				if (has_update)
-					elog(ERROR, "new multixact has more than one updating member");
+					elog(ERROR, "new multixact has more than one updating member: %s",
+						 mxid_to_string(InvalidMultiXactId, nmembers, members));
 				has_update = true;
 			}
 		}
@@ -2496,8 +2499,9 @@ ExtendMultiXactMember(MultiXactOffset offset, int nmembers)
  * longer have any running member transaction.
  *
  * It's not safe to truncate MultiXact SLRU segments on the value returned by
- * this function; however, it can be used by a full-table vacuum to set the
- * point at which it will be possible to truncate SLRU for that table.
+ * this function; however, it can be set as the new relminmxid for any table
+ * that VACUUM knows has no remaining MXIDs < the same value.  It is only safe
+ * to truncate SLRUs when no table can possibly still have a referencing MXID.
  */
 MultiXactId
 GetOldestMultiXactId(void)
@@ -2798,9 +2802,8 @@ ReadMultiXactCounts(uint32 *multixacts, MultiXactOffset *members)
  * this will also be sufficient to keep us from using too many offsets.
  * However, if the average multixact has many members, we might exhaust the
  * members space while still using few enough members that these limits fail
- * to trigger full table scans for relminmxid advancement.  At that point,
- * we'd have no choice but to start failing multixact-creating operations
- * with an error.
+ * to trigger relminmxid advancement by VACUUM.  At that point, we'd have no
+ * choice but to start failing multixact-creating operations with an error.
  *
  * To prevent that, if more than a threshold portion of the members space is
  * used, we effectively reduce autovacuum_multixact_freeze_max_age and
@@ -2812,14 +2815,11 @@ ReadMultiXactCounts(uint32 *multixacts, MultiXactOffset *members)
  * As the fraction of the member space currently in use grows, we become
  * more aggressive in clamping this value.  That not only causes autovacuum
  * to ramp up, but also makes any manual vacuums the user issues more
- * aggressive.  This happens because vacuum_set_xid_limits() clamps the
- * freeze table and the minimum freeze age based on the effective
+ * aggressive.  This happens because vacuum_get_cutoffs() will clamp the
+ * freeze table and the minimum freeze age cutoffs based on the effective
  * autovacuum_multixact_freeze_max_age this function returns.  In the worst
  * case, we'll claim the freeze_max_age to zero, and every vacuum of any
- * table will try to freeze every multixact.
- *
- * It's possible that these thresholds should be user-tunable, but for now
- * we keep it simple.
+ * table will freeze every multixact.
  */
 int
 MultiXactMemberFreezeThreshold(void)
@@ -3270,7 +3270,7 @@ multixact_redo(XLogReaderState *record)
 	else if (info == XLOG_MULTIXACT_CREATE_ID)
 	{
 		xl_multixact_create *xlrec =
-		(xl_multixact_create *) XLogRecGetData(record);
+			(xl_multixact_create *) XLogRecGetData(record);
 		TransactionId max_xid;
 		int			i;
 
@@ -3372,12 +3372,9 @@ pg_get_multixact_members(PG_FUNCTION_ARGS)
 												false);
 		multi->iter = 0;
 
-		tupdesc = CreateTemplateTupleDesc(2);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "xid",
-						   XIDOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "mode",
-						   TEXTOID, -1, 0);
-
+		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+			elog(ERROR, "return type must be a row type");
+		funccxt->tuple_desc = tupdesc;
 		funccxt->attinmeta = TupleDescGetAttInMetadata(tupdesc);
 		funccxt->user_fctx = multi;
 

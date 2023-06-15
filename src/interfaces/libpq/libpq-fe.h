@@ -4,7 +4,7 @@
  *	  This file contains definitions for structures and
  *	  externs for functions used by frontend postgres applications.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/interfaces/libpq/libpq-fe.h
@@ -354,6 +354,7 @@ extern int	PQbackendPID(const PGconn *conn);
 extern PGpipelineStatus PQpipelineStatus(const PGconn *conn);
 extern int	PQconnectionNeedsPassword(const PGconn *conn);
 extern int	PQconnectionUsedPassword(const PGconn *conn);
+extern int	PQconnectionUsedGSSAPI(const PGconn *conn);
 extern int	PQclientEncoding(const PGconn *conn);
 extern int	PQsetClientEncoding(PGconn *conn, const char *encoding);
 

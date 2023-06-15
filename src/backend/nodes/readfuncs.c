@@ -3,7 +3,7 @@
  * readfuncs.c
  *	  Reader functions for Postgres tree nodes.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -194,6 +194,10 @@ nullable_string(const char *token, int length)
 
 /*
  * _readBitmapset
+ *
+ * Note: this code is used in contexts where we know that a Bitmapset
+ * is expected.  There is equivalent code in nodeRead() that can read a
+ * Bitmapset when we come across one in other contexts.
  */
 static Bitmapset *
 _readBitmapset(void)
@@ -234,7 +238,8 @@ _readBitmapset(void)
 }
 
 /*
- * for use by extensions which define extensible nodes
+ * We export this function for use by extensions that define extensible nodes.
+ * That's somewhat historical, though, because calling nodeRead() will work.
  */
 Bitmapset *
 readBitmapset(void)
@@ -300,6 +305,7 @@ _readA_Const(void)
 {
 	READ_LOCALS(A_Const);
 
+	/* We expect either NULL or :val here */
 	token = pg_strtok(&length);
 	if (length == 4 && strncmp(token, "NULL", 4) == 0)
 		local_node->isnull = true;
@@ -307,7 +313,29 @@ _readA_Const(void)
 	{
 		union ValUnion *tmp = nodeRead(NULL, 0);
 
-		memcpy(&local_node->val, tmp, sizeof(*tmp));
+		/* To forestall valgrind complaints, copy only the valid data */
+		switch (nodeTag(tmp))
+		{
+			case T_Integer:
+				memcpy(&local_node->val, tmp, sizeof(Integer));
+				break;
+			case T_Float:
+				memcpy(&local_node->val, tmp, sizeof(Float));
+				break;
+			case T_Boolean:
+				memcpy(&local_node->val, tmp, sizeof(Boolean));
+				break;
+			case T_String:
+				memcpy(&local_node->val, tmp, sizeof(String));
+				break;
+			case T_BitString:
+				memcpy(&local_node->val, tmp, sizeof(BitString));
+				break;
+			default:
+				elog(ERROR, "unrecognized node type: %d",
+					 (int) nodeTag(tmp));
+				break;
+		}
 	}
 
 	READ_LOCATION_FIELD(location);
@@ -468,10 +496,16 @@ _readRangeTblEntry(void)
 			READ_CHAR_FIELD(relkind);
 			READ_INT_FIELD(rellockmode);
 			READ_NODE_FIELD(tablesample);
+			READ_UINT_FIELD(perminfoindex);
 			break;
 		case RTE_SUBQUERY:
 			READ_NODE_FIELD(subquery);
 			READ_BOOL_FIELD(security_barrier);
+			/* we re-use these RELATION fields, too: */
+			READ_OID_FIELD(relid);
+			READ_CHAR_FIELD(relkind);
+			READ_INT_FIELD(rellockmode);
+			READ_UINT_FIELD(perminfoindex);
 			break;
 		case RTE_JOIN:
 			READ_ENUM_FIELD(jointype, JoinType);
@@ -514,10 +548,11 @@ _readRangeTblEntry(void)
 		case RTE_NAMEDTUPLESTORE:
 			READ_STRING_FIELD(enrname);
 			READ_FLOAT_FIELD(enrtuples);
-			READ_OID_FIELD(relid);
 			READ_NODE_FIELD(coltypes);
 			READ_NODE_FIELD(coltypmods);
 			READ_NODE_FIELD(colcollations);
+			/* we re-use these RELATION fields, too: */
+			READ_OID_FIELD(relid);
 			break;
 		case RTE_RESULT:
 			/* no extra fields */
@@ -531,12 +566,6 @@ _readRangeTblEntry(void)
 	READ_BOOL_FIELD(lateral);
 	READ_BOOL_FIELD(inh);
 	READ_BOOL_FIELD(inFromCl);
-	READ_UINT_FIELD(requiredPerms);
-	READ_OID_FIELD(checkAsUser);
-	READ_BITMAPSET_FIELD(selectedCols);
-	READ_BITMAPSET_FIELD(insertedCols);
-	READ_BITMAPSET_FIELD(updatedCols);
-	READ_BITMAPSET_FIELD(extraUpdatedCols);
 	READ_NODE_FIELD(securityQuals);
 
 	READ_DONE();
@@ -668,8 +697,6 @@ _readExtensibleNode(void)
 Node *
 parseNodeString(void)
 {
-	void	   *return_value;
-
 	READ_TEMP_LOCALS();
 
 	/* Guard against stack overflow due to overly complex expressions */
@@ -680,16 +707,10 @@ parseNodeString(void)
 #define MATCH(tokname, namelen) \
 	(length == namelen && memcmp(token, tokname, namelen) == 0)
 
-	if (false)
-		;
 #include "readfuncs.switch.c"
-	else
-	{
-		elog(ERROR, "badly formatted node string \"%.32s\"...", token);
-		return_value = NULL;	/* keep compiler quiet */
-	}
 
-	return (Node *) return_value;
+	elog(ERROR, "badly formatted node string \"%.32s\"...", token);
+	return NULL;				/* keep compiler quiet */
 }
 
 

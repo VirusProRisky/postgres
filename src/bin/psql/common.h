@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2023, PostgreSQL Global Development Group
  *
  * src/bin/psql/common.h
  */
@@ -28,6 +28,8 @@ extern volatile sig_atomic_t sigint_interrupt_enabled;
 extern sigjmp_buf sigint_interrupt_jmp;
 
 extern void psql_setup_cancel_handler(void);
+
+extern void SetShellResultVariables(int wait_result);
 
 extern PGresult *PSQLexec(const char *query);
 extern int	PSQLexecWatch(const char *query, const printQueryOpt *opt, FILE *printQueryFout);

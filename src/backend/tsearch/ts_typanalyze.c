@@ -3,7 +3,7 @@
  * ts_typanalyze.c
  *	  functions for gathering statistics from tsvector columns
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -19,6 +19,7 @@
 #include "common/hashfn.h"
 #include "tsearch/ts_type.h"
 #include "utils/builtins.h"
+#include "varatt.h"
 
 
 /* A hash key for lexemes */
@@ -253,7 +254,7 @@ compute_tsvector_stats(VacAttrStats *stats,
 
 			/* Lookup current lexeme in hashtable, adding it if new */
 			item = (TrackItem *) hash_search(lexemes_tab,
-											 (const void *) &hash_key,
+											 &hash_key,
 											 HASH_ENTER, &found);
 
 			if (found)
@@ -463,7 +464,7 @@ prune_lexemes_hashtable(HTAB *lexemes_tab, int b_current)
 		{
 			char	   *lexeme = item->key.lexeme;
 
-			if (hash_search(lexemes_tab, (const void *) &item->key,
+			if (hash_search(lexemes_tab, &item->key,
 							HASH_REMOVE, NULL) == NULL)
 				elog(ERROR, "hash table corrupted");
 			pfree(lexeme);

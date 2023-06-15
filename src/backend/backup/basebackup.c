@@ -3,7 +3,7 @@
  * basebackup.c
  *	  code for taking a base backup and streaming it to a standby
  *
- * Portions Copyright (c) 2010-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/backup/basebackup.c
@@ -254,7 +254,7 @@ perform_base_backup(basebackup_options *opt, bbsink *sink)
 
 	total_checksum_failures = 0;
 
-	/* Allocate backup related varilables. */
+	/* Allocate backup related variables. */
 	backup_state = (BackupState *) palloc0(sizeof(BackupState));
 	tablespace_map = makeStringInfo();
 
@@ -370,7 +370,7 @@ perform_base_backup(basebackup_options *opt, bbsink *sink)
 			else
 			{
 				/* Properly terminate the tarfile. */
-				StaticAssertStmt(2 * TAR_BLOCK_SIZE <= BLCKSZ,
+				StaticAssertDecl(2 * TAR_BLOCK_SIZE <= BLCKSZ,
 								 "BLCKSZ too small for 2 tar blocks");
 				memset(sink->bbs_buffer, 0, 2 * TAR_BLOCK_SIZE);
 				bbsink_archive_contents(sink, 2 * TAR_BLOCK_SIZE);
@@ -1073,6 +1073,7 @@ sendFileWithContent(bbsink *sink, const char *filename, const char *content,
 		memcpy(sink->bbs_buffer, content, nbytes);
 		bbsink_archive_contents(sink, nbytes);
 		bytes_done += nbytes;
+		content += nbytes;
 	}
 
 	_tarWritePadding(sink, len);
@@ -1466,13 +1467,6 @@ is_checksummed_file(const char *fullpath, const char *filename)
 		return false;
 }
 
-/*****
- * Functions for handling tar file format
- *
- * Copied from pg_dump, but modified to work with libpq for sending
- */
-
-
 /*
  * Given the member, write the TAR header & send the file.
  *
@@ -1567,14 +1561,6 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 								   len, readfilename, true);
 
 		/*
-		 * If we hit end-of-file, a concurrent truncation must have occurred.
-		 * That's not an error condition, because WAL replay will fix things
-		 * up.
-		 */
-		if (cnt == 0)
-			break;
-
-		/*
 		 * The checksums are verified at block level, so we iterate over the
 		 * buffer in chunks of BLCKSZ, after making sure that
 		 * TAR_SEND_SIZE/buf is divisible by BLCKSZ and we read a multiple of
@@ -1616,11 +1602,21 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 						 * Retry the block on the first failure.  It's
 						 * possible that we read the first 4K page of the
 						 * block just before postgres updated the entire block
-						 * so it ends up looking torn to us.  We only need to
-						 * retry once because the LSN should be updated to
-						 * something we can ignore on the next pass.  If the
-						 * error happens again then it is a true validation
-						 * failure.
+						 * so it ends up looking torn to us. If, before we
+						 * retry the read, the concurrent write of the block
+						 * finishes, the page LSN will be updated and we'll
+						 * realize that we should ignore this block.
+						 *
+						 * There's no guarantee that this will actually
+						 * happen, though: the torn write could take an
+						 * arbitrarily long time to complete. Retrying
+						 * multiple times wouldn't fix this problem, either,
+						 * though it would reduce the chances of it happening
+						 * in practice. The only real fix here seems to be to
+						 * have some kind of interlock that allows us to wait
+						 * until we can be certain that no write to the block
+						 * is in progress. Since we don't have any such thing
+						 * right now, we just do this and hope for the best.
 						 */
 						if (block_retry == false)
 						{
@@ -1676,6 +1672,15 @@ sendFile(bbsink *sink, const char *readfilename, const char *tarfilename,
 			}
 		}
 
+		/*
+		 * If we hit end-of-file, a concurrent truncation must have occurred.
+		 * That's not an error condition, because WAL replay will fix things
+		 * up.
+		 */
+		if (cnt == 0)
+			break;
+
+		/* Archive the data we just read. */
 		bbsink_archive_contents(sink, cnt);
 
 		/* Also feed it to the checksum machinery. */
@@ -1744,7 +1749,7 @@ _tarWriteHeader(bbsink *sink, const char *filename, const char *linktarget,
 		 * large enough to fit an entire tar block. We double-check by means
 		 * of these assertions.
 		 */
-		StaticAssertStmt(TAR_BLOCK_SIZE <= BLCKSZ,
+		StaticAssertDecl(TAR_BLOCK_SIZE <= BLCKSZ,
 						 "BLCKSZ too small for tar block");
 		Assert(sink->bbs_buffer_length >= TAR_BLOCK_SIZE);
 

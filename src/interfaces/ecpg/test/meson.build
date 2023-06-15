@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 # can't run ecpg to build test dependencies, at least not without an emulator
 if meson.is_cross_build()
   subdir_done()
@@ -67,7 +69,6 @@ ecpg_test_files = files(
 ecpg_regress_args = [
   '--dbname=ecpg1_regression,ecpg2_regression',
   '--create-role=regress_ecpg_user1,regress_ecpg_user2',
-  '--encoding=SQL_ASCII',
 ]
 
 tests += {
@@ -84,6 +85,7 @@ tests += {
     'test_kwargs': {
       'depends': ecpg_test_dependencies,
     },
+    'dbname': 'ecpg1_regression,ecpg2_regression',
     'regress_args': ecpg_regress_args,
   },
 }

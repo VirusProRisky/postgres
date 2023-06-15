@@ -2,7 +2,7 @@
  * reorderbuffer.h
  *	  PostgreSQL logical replay/reorder buffer management.
  *
- * Copyright (c) 2012-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2023, PostgreSQL Global Development Group
  *
  * src/include/replication/reorderbuffer.h
  */
@@ -17,7 +17,16 @@
 #include "utils/snapshot.h"
 #include "utils/timestamp.h"
 
+/* GUC variables */
 extern PGDLLIMPORT int logical_decoding_work_mem;
+extern PGDLLIMPORT int logical_replication_mode;
+
+/* possible values for logical_replication_mode */
+typedef enum
+{
+	LOGICAL_REP_MODE_BUFFERED,
+	LOGICAL_REP_MODE_IMMEDIATE
+}			LogicalRepMode;
 
 /* an individual tuple, stored in one chunk of memory */
 typedef struct ReorderBufferTupleBuf
@@ -168,14 +177,15 @@ typedef struct ReorderBufferChange
 } ReorderBufferChange;
 
 /* ReorderBufferTXN txn_flags */
-#define RBTXN_HAS_CATALOG_CHANGES 0x0001
-#define RBTXN_IS_SUBXACT          0x0002
-#define RBTXN_IS_SERIALIZED       0x0004
-#define RBTXN_IS_SERIALIZED_CLEAR 0x0008
-#define RBTXN_IS_STREAMED         0x0010
-#define RBTXN_HAS_PARTIAL_CHANGE  0x0020
-#define RBTXN_PREPARE             0x0040
-#define RBTXN_SKIPPED_PREPARE	  0x0080
+#define RBTXN_HAS_CATALOG_CHANGES 	0x0001
+#define RBTXN_IS_SUBXACT          	0x0002
+#define RBTXN_IS_SERIALIZED       	0x0004
+#define RBTXN_IS_SERIALIZED_CLEAR 	0x0008
+#define RBTXN_IS_STREAMED         	0x0010
+#define RBTXN_HAS_PARTIAL_CHANGE  	0x0020
+#define RBTXN_PREPARE             	0x0040
+#define RBTXN_SKIPPED_PREPARE	  	0x0080
+#define RBTXN_HAS_STREAMABLE_CHANGE	0x0100
 
 /* Does the transaction have catalog changes? */
 #define rbtxn_has_catalog_changes(txn) \
@@ -207,6 +217,12 @@ typedef struct ReorderBufferChange
 	((txn)->txn_flags & RBTXN_HAS_PARTIAL_CHANGE) != 0 \
 )
 
+/* Does this transaction contain streamable changes? */
+#define rbtxn_has_streamable_change(txn) \
+( \
+	((txn)->txn_flags & RBTXN_HAS_STREAMABLE_CHANGE) != 0 \
+)
+
 /*
  * Has this transaction been streamed to downstream?
  *
@@ -231,6 +247,24 @@ typedef struct ReorderBufferChange
 #define rbtxn_skip_prepared(txn) \
 ( \
 	((txn)->txn_flags & RBTXN_SKIPPED_PREPARE) != 0 \
+)
+
+/* Is this a top-level transaction? */
+#define rbtxn_is_toptxn(txn) \
+( \
+	(txn)->toptxn == NULL \
+)
+
+/* Is this a subtransaction? */
+#define rbtxn_is_subtxn(txn) \
+( \
+	(txn)->toptxn != NULL \
+)
+
+/* Get the top-level transaction of this (sub)transaction. */
+#define rbtxn_get_toptxn(txn) \
+( \
+	rbtxn_is_subtxn(txn) ? (txn)->toptxn : (txn) \
 )
 
 typedef struct ReorderBufferTXN
@@ -301,6 +335,7 @@ typedef struct ReorderBufferTXN
 	{
 		TimestampTz commit_time;
 		TimestampTz prepare_time;
+		TimestampTz abort_time;
 	}			xact_time;
 
 	/*
@@ -509,6 +544,12 @@ typedef void (*ReorderBufferStreamTruncateCB) (
 											   Relation relations[],
 											   ReorderBufferChange *change);
 
+/* update progress txn callback signature */
+typedef void (*ReorderBufferUpdateProgressTxnCB) (
+												  ReorderBuffer *rb,
+												  ReorderBufferTXN *txn,
+												  XLogRecPtr lsn);
+
 struct ReorderBuffer
 {
 	/*
@@ -571,6 +612,12 @@ struct ReorderBuffer
 	ReorderBufferStreamChangeCB stream_change;
 	ReorderBufferStreamMessageCB stream_message;
 	ReorderBufferStreamTruncateCB stream_truncate;
+
+	/*
+	 * Callback to be called when updating progress during sending data of a
+	 * transaction (and its subtransactions) to the output plugin.
+	 */
+	ReorderBufferUpdateProgressTxnCB update_progress_txn;
 
 	/*
 	 * Pointer that will be passed untouched to the callbacks.
@@ -663,7 +710,8 @@ extern void ReorderBufferAssignChild(ReorderBuffer *rb, TransactionId xid,
 extern void ReorderBufferCommitChild(ReorderBuffer *rb, TransactionId xid,
 									 TransactionId subxid, XLogRecPtr commit_lsn,
 									 XLogRecPtr end_lsn);
-extern void ReorderBufferAbort(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
+extern void ReorderBufferAbort(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn,
+							   TimestampTz abort_time);
 extern void ReorderBufferAbortOld(ReorderBuffer *rb, TransactionId oldestRunningXid);
 extern void ReorderBufferForget(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);
 extern void ReorderBufferInvalidate(ReorderBuffer *rb, TransactionId xid, XLogRecPtr lsn);

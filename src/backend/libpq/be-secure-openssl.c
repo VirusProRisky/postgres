@@ -4,7 +4,7 @@
  *	  functions for OpenSSL support in the backend.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1025,7 +1025,7 @@ load_dh_file(char *filename, bool isServerStart)
  *	Load hardcoded DH parameters.
  *
  *	If DH parameters cannot be loaded from a specified file, we can load
- *	the	hardcoded DH parameters supplied with the backend to prevent
+ *	the hardcoded DH parameters supplied with the backend to prevent
  *	problems.
  */
 static DH  *
@@ -1104,8 +1104,8 @@ prepare_cert_name(char *name)
 	if (namelen > MAXLEN)
 	{
 		/*
-		 * Keep the end of the name, not the beginning, since the most specific
-		 * field is likely to give users the most information.
+		 * Keep the end of the name, not the beginning, since the most
+		 * specific field is likely to give users the most information.
 		 */
 		truncated = name + namelen - MAXLEN;
 		truncated[0] = truncated[1] = truncated[2] = '.';
@@ -1165,8 +1165,8 @@ verify_cb(int ok, X509_STORE_CTX *ctx)
 
 		/*
 		 * Get the Subject and Issuer for logging, but don't let maliciously
-		 * huge certs flood the logs, and don't reflect non-ASCII bytes into it
-		 * either.
+		 * huge certs flood the logs, and don't reflect non-ASCII bytes into
+		 * it either.
 		 */
 		subject = X509_NAME_to_cstring(X509_get_subject_name(cert));
 		sub_prepared = prepare_cert_name(subject);
@@ -1429,7 +1429,7 @@ be_tls_get_peer_serial(Port *port, char *ptr, size_t len)
 		ptr[0] = '\0';
 }
 
-#ifdef HAVE_X509_GET_SIGNATURE_NID
+#if defined(HAVE_X509_GET_SIGNATURE_NID) || defined(HAVE_X509_GET_SIGNATURE_INFO)
 char *
 be_tls_get_certificate_hash(Port *port, size_t *len)
 {
@@ -1447,10 +1447,15 @@ be_tls_get_certificate_hash(Port *port, size_t *len)
 
 	/*
 	 * Get the signature algorithm of the certificate to determine the hash
-	 * algorithm to use for the result.
+	 * algorithm to use for the result.  Prefer X509_get_signature_info(),
+	 * introduced in OpenSSL 1.1.1, which can handle RSA-PSS signatures.
 	 */
+#if HAVE_X509_GET_SIGNATURE_INFO
+	if (!X509_get_signature_info(server_cert, &algo_nid, NULL, NULL, NULL))
+#else
 	if (!OBJ_find_sigid_algs(X509_get_signature_nid(server_cert),
 							 &algo_nid, NULL))
+#endif
 		elog(ERROR, "could not determine server certificate signature algorithm");
 
 	/*
@@ -1552,7 +1557,8 @@ X509_NAME_to_cstring(X509_NAME *name)
  * Convert TLS protocol version GUC enum to OpenSSL values
  *
  * This is a straightforward one-to-one mapping, but doing it this way makes
- * guc.c independent of OpenSSL availability and version.
+ * the definitions of ssl_min_protocol_version and ssl_max_protocol_version
+ * independent of OpenSSL availability and version.
  *
  * If a version is passed that is not supported by the current OpenSSL
  * version, then we return -1.  If a nonnegative value is returned,

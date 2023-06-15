@@ -3,7 +3,7 @@
  * execParallel.c
  *	  Support routines for parallel execution.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * This file contains routines that are intended to support setting up,
@@ -184,6 +184,7 @@ ExecSerializePlan(Plan *plan, EState *estate)
 	pstmt->parallelModeNeeded = false;
 	pstmt->planTree = plan;
 	pstmt->rtable = estate->es_range_table;
+	pstmt->permInfos = estate->es_rteperminfos;
 	pstmt->resultRelations = NIL;
 	pstmt->appendRelations = NIL;
 

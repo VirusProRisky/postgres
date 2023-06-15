@@ -28,7 +28,7 @@
  * the current system state, and for starting/stopping backups.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/xlog.c
@@ -2190,6 +2190,8 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 				/* Measure I/O timing to write WAL data */
 				if (track_wal_io_timing)
 					INSTR_TIME_SET_CURRENT(start);
+				else
+					INSTR_TIME_SET_ZERO(start);
 
 				pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
 				written = pg_pwrite(openLogFile, from, nleft, startoffset);
@@ -2204,8 +2206,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 					instr_time	duration;
 
 					INSTR_TIME_SET_CURRENT(duration);
-					INSTR_TIME_SUBTRACT(duration, start);
-					PendingWalStats.wal_write_time += INSTR_TIME_GET_MICROSEC(duration);
+					INSTR_TIME_ACCUM_DIFF(PendingWalStats.wal_write_time, duration, start);
 				}
 
 				PendingWalStats.wal_write++;
@@ -2644,7 +2645,7 @@ XLogFlush(XLogRecPtr record)
 	END_CRIT_SECTION();
 
 	/* wake up walsenders now that we've released heavily contended locks */
-	WalSndWakeupProcessRequests();
+	WalSndWakeupProcessRequests(true, !RecoveryInProgress());
 
 	/*
 	 * If we still haven't flushed to the request point then we have a
@@ -2815,7 +2816,7 @@ XLogBackgroundFlush(void)
 	END_CRIT_SECTION();
 
 	/* wake up walsenders now that we've released heavily contended locks */
-	WalSndWakeupProcessRequests();
+	WalSndWakeupProcessRequests(true, !RecoveryInProgress());
 
 	/*
 	 * Great, done. To take some work off the critical path, try to initialize
@@ -2925,6 +2926,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	XLogSegNo	max_segno;
 	int			fd;
 	int			save_errno;
+	int			open_flags = O_RDWR | O_CREAT | O_EXCL | PG_BINARY;
 
 	Assert(logtli != 0);
 
@@ -2934,7 +2936,8 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	 * Try to use existent file (checkpoint maker may have created it already)
 	 */
 	*added = false;
-	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | get_sync_bit(sync_method));
+	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | O_CLOEXEC |
+					   get_sync_bit(sync_method));
 	if (fd < 0)
 	{
 		if (errno != ENOENT)
@@ -2957,8 +2960,11 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 
 	unlink(tmppath);
 
+	if (io_direct_flags & IO_DIRECT_WAL_INIT)
+		open_flags |= PG_O_DIRECT;
+
 	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
-	fd = BasicOpenFile(tmppath, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
+	fd = BasicOpenFile(tmppath, open_flags);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -2979,7 +2985,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 		 * indirect blocks are down on disk.  Therefore, fdatasync(2) or
 		 * O_DSYNC will be sufficient to sync future writes to the log file.
 		 */
-		rc = pg_pwrite_zeros(fd, wal_segment_size);
+		rc = pg_pwrite_zeros(fd, wal_segment_size, 0);
 
 		if (rc < 0)
 			save_errno = errno;
@@ -3095,7 +3101,8 @@ XLogFileInit(XLogSegNo logsegno, TimeLineID logtli)
 		return fd;
 
 	/* Now open original target segment (might not be file I just made) */
-	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | get_sync_bit(sync_method));
+	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | O_CLOEXEC |
+					   get_sync_bit(sync_method));
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -3326,7 +3333,8 @@ XLogFileOpen(XLogSegNo segno, TimeLineID tli)
 
 	XLogFilePath(path, tli, segno, wal_segment_size);
 
-	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | get_sync_bit(sync_method));
+	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | O_CLOEXEC |
+					   get_sync_bit(sync_method));
 	if (fd < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
@@ -3350,7 +3358,7 @@ XLogFileClose(void)
 	 * use the cache to read the WAL segment.
 	 */
 #if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_DONTNEED)
-	if (!XLogIsNeeded())
+	if (!XLogIsNeeded() && (io_direct_flags & IO_DIRECT_WAL) == 0)
 		(void) posix_fadvise(openLogFile, 0, 0, POSIX_FADV_DONTNEED);
 #endif
 
@@ -3882,15 +3890,6 @@ WriteControlFile(void)
 {
 	int			fd;
 	char		buffer[PG_CONTROL_FILE_SIZE];	/* need not be aligned */
-
-	/*
-	 * Ensure that the size of the pg_control data structure is sane.  See the
-	 * comments for these symbols in pg_control.h.
-	 */
-	StaticAssertStmt(sizeof(ControlFileData) <= PG_CONTROL_MAX_SAFE_SIZE,
-					 "pg_control is too large for atomic disk writes");
-	StaticAssertStmt(sizeof(ControlFileData) <= PG_CONTROL_FILE_SIZE,
-					 "sizeof(ControlFileData) exceeds PG_CONTROL_FILE_SIZE");
 
 	/*
 	 * Initialize version and compatibility-check fields
@@ -4450,7 +4449,6 @@ show_in_hot_standby(void)
 	return RecoveryInProgress() ? "on" : "off";
 }
 
-
 /*
  * Read the control file, set respective GUCs.
  *
@@ -4469,6 +4467,17 @@ LocalProcessControlFile(bool reset)
 	Assert(reset || ControlFile == NULL);
 	ControlFile = palloc(sizeof(ControlFileData));
 	ReadControlFile();
+}
+
+/*
+ * Get the wal_level from the control file. For a standby, this value should be
+ * considered as its active wal_level, because it may be different from what
+ * was originally configured on standby.
+ */
+WalLevel
+GetActiveWalLevelOnStandby(void)
+{
+	return ControlFile->wal_level;
 }
 
 /*
@@ -4511,7 +4520,7 @@ XLOGShmemSize(void)
 	/* xlblocks array */
 	size = add_size(size, mul_size(sizeof(XLogRecPtr), XLOGbuffers));
 	/* extra alignment padding for XLOG I/O buffers */
-	size = add_size(size, XLOG_BLCKSZ);
+	size = add_size(size, Max(XLOG_BLCKSZ, PG_IO_ALIGN_SIZE));
 	/* and the buffers themselves */
 	size = add_size(size, mul_size(XLOG_BLCKSZ, XLOGbuffers));
 
@@ -5451,8 +5460,8 @@ StartupXLOG(void)
 	missingContrecPtr = endOfRecoveryInfo->missingContrecPtr;
 
 	/*
-	 * Reset ps status display, so as no information related to recovery
-	 * shows up.
+	 * Reset ps status display, so as no information related to recovery shows
+	 * up.
 	 */
 	set_ps_display("");
 
@@ -5587,9 +5596,9 @@ StartupXLOG(void)
 	if (!XLogRecPtrIsInvalid(missingContrecPtr))
 	{
 		/*
-		 * We should only have a missingContrecPtr if we're not switching to
-		 * a new timeline. When a timeline switch occurs, WAL is copied from
-		 * the old timeline to the new only up to the end of the last complete
+		 * We should only have a missingContrecPtr if we're not switching to a
+		 * new timeline. When a timeline switch occurs, WAL is copied from the
+		 * old timeline to the new only up to the end of the last complete
 		 * record, so there can't be an incomplete WAL record that we need to
 		 * disregard.
 		 */
@@ -5767,7 +5776,7 @@ StartupXLOG(void)
 	 * If there were cascading standby servers connected to us, nudge any wal
 	 * sender processes to notice that we've been promoted.
 	 */
-	WalSndWakeup();
+	WalSndWakeup(true, true);
 
 	/*
 	 * If this was a promotion, request an (online) checkpoint now. This isn't
@@ -5826,7 +5835,7 @@ ReachedEndOfBackup(XLogRecPtr EndRecPtr, TimeLineID tli)
 {
 	/*
 	 * We have reached the end of base backup, as indicated by pg_control. The
-	 * data on disk is now consistent (unless minRecovery point is further
+	 * data on disk is now consistent (unless minRecoveryPoint is further
 	 * ahead, which can happen if we crashed during previous recovery).  Reset
 	 * backupStartPoint and backupEndPoint, and update minRecoveryPoint to
 	 * make sure we don't allow starting up at an earlier point even if
@@ -6811,7 +6820,9 @@ CreateCheckPoint(int flags)
 	 */
 	XLByteToSeg(RedoRecPtr, _logSegNo, wal_segment_size);
 	KeepLogSeg(recptr, &_logSegNo);
-	if (InvalidateObsoleteReplicationSlots(_logSegNo))
+	if (InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_REMOVED,
+										   _logSegNo, InvalidOid,
+										   InvalidTransactionId))
 	{
 		/*
 		 * Some slots have been invalidated; recalculate the old-segment
@@ -7255,7 +7266,9 @@ CreateRestartPoint(int flags)
 	replayPtr = GetXLogReplayRecPtr(&replayTLI);
 	endptr = (receivePtr < replayPtr) ? replayPtr : receivePtr;
 	KeepLogSeg(endptr, &_logSegNo);
-	if (InvalidateObsoleteReplicationSlots(_logSegNo))
+	if (InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_REMOVED,
+										   _logSegNo, InvalidOid,
+										   InvalidTransactionId))
 	{
 		/*
 		 * Some slots have been invalidated; recalculate the old-segment
@@ -7342,7 +7355,8 @@ CreateRestartPoint(int flags)
  *   above.
  *
  * * WALAVAIL_REMOVED means it has been removed. A replication stream on
- *   a slot with this LSN cannot continue after a restart.
+ *   a slot with this LSN cannot continue.  (Any associated walsender
+ *   processes should have been terminated already.)
  *
  * * WALAVAIL_INVALID_LSN means the slot hasn't been set to reserve WAL.
  */
@@ -7445,7 +7459,7 @@ KeepLogSeg(XLogRecPtr recptr, XLogSegNo *logSegNo)
 	 * max_slot_wal_keep_size.
 	 */
 	keep = XLogGetReplicationSlotMinimumLSN();
-	if (keep != InvalidXLogRecPtr)
+	if (keep != InvalidXLogRecPtr && keep < recptr)
 	{
 		XLByteToSeg(keep, segno, wal_segment_size);
 
@@ -7967,6 +7981,21 @@ xlog_redo(XLogReaderState *record)
 		/* Update our copy of the parameters in pg_control */
 		memcpy(&xlrec, XLogRecGetData(record), sizeof(xl_parameter_change));
 
+		/*
+		 * Invalidate logical slots if we are in hot standby and the primary
+		 * does not have a WAL level sufficient for logical decoding. No need
+		 * to search for potentially conflicting logically slots if standby is
+		 * running with wal_level lower than logical, because in that case, we
+		 * would have either disallowed creation of logical slots or
+		 * invalidated existing ones.
+		 */
+		if (InRecovery && InHotStandby &&
+			xlrec.wal_level < WAL_LEVEL_LOGICAL &&
+			wal_level >= WAL_LEVEL_LOGICAL)
+			InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_LEVEL,
+											   0, InvalidOid,
+											   InvalidTransactionId);
+
 		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 		ControlFile->MaxConnections = xlrec.MaxConnections;
 		ControlFile->max_worker_processes = xlrec.max_worker_processes;
@@ -8033,34 +8062,26 @@ xlog_redo(XLogReaderState *record)
 }
 
 /*
- * Return the (possible) sync flag used for opening a file, depending on the
- * value of the GUC wal_sync_method.
+ * Return the extra open flags used for opening a file, depending on the
+ * value of the GUCs wal_sync_method, fsync and io_direct.
  */
 static int
 get_sync_bit(int method)
 {
 	int			o_direct_flag = 0;
 
-	/* If fsync is disabled, never open in sync mode */
-	if (!enableFsync)
-		return 0;
-
 	/*
-	 * Optimize writes by bypassing kernel cache with O_DIRECT when using
-	 * O_SYNC and O_DSYNC.  But only if archiving and streaming are disabled,
-	 * otherwise the archive command or walsender process will read the WAL
-	 * soon after writing it, which is guaranteed to cause a physical read if
-	 * we bypassed the kernel cache. We also skip the
-	 * posix_fadvise(POSIX_FADV_DONTNEED) call in XLogFileClose() for the same
-	 * reason.
-	 *
-	 * Never use O_DIRECT in walreceiver process for similar reasons; the WAL
+	 * Use O_DIRECT if requested, except in walreceiver process.  The WAL
 	 * written by walreceiver is normally read by the startup process soon
-	 * after it's written. Also, walreceiver performs unaligned writes, which
+	 * after it's written.  Also, walreceiver performs unaligned writes, which
 	 * don't work with O_DIRECT, so it is required for correctness too.
 	 */
-	if (!XLogIsNeeded() && !AmWalReceiverProcess())
+	if ((io_direct_flags & IO_DIRECT_WAL) && !AmWalReceiverProcess())
 		o_direct_flag = PG_O_DIRECT;
+
+	/* If fsync is disabled, never open in sync mode */
+	if (!enableFsync)
+		return o_direct_flag;
 
 	switch (method)
 	{
@@ -8073,7 +8094,7 @@ get_sync_bit(int method)
 		case SYNC_METHOD_FSYNC:
 		case SYNC_METHOD_FSYNC_WRITETHROUGH:
 		case SYNC_METHOD_FDATASYNC:
-			return 0;
+			return o_direct_flag;
 #ifdef O_SYNC
 		case SYNC_METHOD_OPEN:
 			return O_SYNC | o_direct_flag;
@@ -8154,6 +8175,8 @@ issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli)
 	/* Measure I/O timing to sync the WAL file */
 	if (track_wal_io_timing)
 		INSTR_TIME_SET_CURRENT(start);
+	else
+		INSTR_TIME_SET_ZERO(start);
 
 	pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
 	switch (sync_method)
@@ -8205,8 +8228,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli)
 		instr_time	duration;
 
 		INSTR_TIME_SET_CURRENT(duration);
-		INSTR_TIME_SUBTRACT(duration, start);
-		PendingWalStats.wal_sync_time += INSTR_TIME_GET_MICROSEC(duration);
+		INSTR_TIME_ACCUM_DIFF(PendingWalStats.wal_sync_time, duration, start);
 	}
 
 	PendingWalStats.wal_sync++;
@@ -8432,9 +8454,8 @@ do_pg_backup_start(const char *backupidstr, bool fast, List **tablespaces,
 			char		fullpath[MAXPGPATH + 10];
 			char		linkpath[MAXPGPATH];
 			char	   *relpath = NULL;
-			int			rllen;
-			StringInfoData escapedpath;
 			char	   *s;
+			PGFileType	de_type;
 
 			/* Skip anything that doesn't look like a tablespace */
 			if (strspn(de->d_name, "0123456789") != strlen(de->d_name))
@@ -8442,66 +8463,83 @@ do_pg_backup_start(const char *backupidstr, bool fast, List **tablespaces,
 
 			snprintf(fullpath, sizeof(fullpath), "pg_tblspc/%s", de->d_name);
 
-			/*
-			 * Skip anything that isn't a symlink/junction.  For testing only,
-			 * we sometimes use allow_in_place_tablespaces to create
-			 * directories directly under pg_tblspc, which would fail below.
-			 */
-			if (get_dirent_type(fullpath, de, false, ERROR) != PGFILETYPE_LNK)
-				continue;
+			de_type = get_dirent_type(fullpath, de, false, ERROR);
 
-			rllen = readlink(fullpath, linkpath, sizeof(linkpath));
-			if (rllen < 0)
+			if (de_type == PGFILETYPE_LNK)
 			{
-				ereport(WARNING,
-						(errmsg("could not read symbolic link \"%s\": %m",
-								fullpath)));
+				StringInfoData escapedpath;
+				int			rllen;
+
+				rllen = readlink(fullpath, linkpath, sizeof(linkpath));
+				if (rllen < 0)
+				{
+					ereport(WARNING,
+							(errmsg("could not read symbolic link \"%s\": %m",
+									fullpath)));
+					continue;
+				}
+				else if (rllen >= sizeof(linkpath))
+				{
+					ereport(WARNING,
+							(errmsg("symbolic link \"%s\" target is too long",
+									fullpath)));
+					continue;
+				}
+				linkpath[rllen] = '\0';
+
+				/*
+				 * Relpath holds the relative path of the tablespace directory
+				 * when it's located within PGDATA, or NULL if it's located
+				 * elsewhere.
+				 */
+				if (rllen > datadirpathlen &&
+					strncmp(linkpath, DataDir, datadirpathlen) == 0 &&
+					IS_DIR_SEP(linkpath[datadirpathlen]))
+					relpath = pstrdup(linkpath + datadirpathlen + 1);
+
+				/*
+				 * Add a backslash-escaped version of the link path to the
+				 * tablespace map file.
+				 */
+				initStringInfo(&escapedpath);
+				for (s = linkpath; *s; s++)
+				{
+					if (*s == '\n' || *s == '\r' || *s == '\\')
+						appendStringInfoChar(&escapedpath, '\\');
+					appendStringInfoChar(&escapedpath, *s);
+				}
+				appendStringInfo(tblspcmapfile, "%s %s\n",
+								 de->d_name, escapedpath.data);
+				pfree(escapedpath.data);
+			}
+			else if (de_type == PGFILETYPE_DIR)
+			{
+				/*
+				 * It's possible to use allow_in_place_tablespaces to create
+				 * directories directly under pg_tblspc, for testing purposes
+				 * only.
+				 *
+				 * In this case, we store a relative path rather than an
+				 * absolute path into the tablespaceinfo.
+				 */
+				snprintf(linkpath, sizeof(linkpath), "pg_tblspc/%s",
+						 de->d_name);
+				relpath = pstrdup(linkpath);
+			}
+			else
+			{
+				/* Skip any other file type that appears here. */
 				continue;
 			}
-			else if (rllen >= sizeof(linkpath))
-			{
-				ereport(WARNING,
-						(errmsg("symbolic link \"%s\" target is too long",
-								fullpath)));
-				continue;
-			}
-			linkpath[rllen] = '\0';
-
-			/*
-			 * Build a backslash-escaped version of the link path to include
-			 * in the tablespace map file.
-			 */
-			initStringInfo(&escapedpath);
-			for (s = linkpath; *s; s++)
-			{
-				if (*s == '\n' || *s == '\r' || *s == '\\')
-					appendStringInfoChar(&escapedpath, '\\');
-				appendStringInfoChar(&escapedpath, *s);
-			}
-
-			/*
-			 * Relpath holds the relative path of the tablespace directory
-			 * when it's located within PGDATA, or NULL if it's located
-			 * elsewhere.
-			 */
-			if (rllen > datadirpathlen &&
-				strncmp(linkpath, DataDir, datadirpathlen) == 0 &&
-				IS_DIR_SEP(linkpath[datadirpathlen]))
-				relpath = linkpath + datadirpathlen + 1;
 
 			ti = palloc(sizeof(tablespaceinfo));
 			ti->oid = pstrdup(de->d_name);
 			ti->path = pstrdup(linkpath);
-			ti->rpath = relpath ? pstrdup(relpath) : NULL;
+			ti->rpath = relpath;
 			ti->size = -1;
 
 			if (tablespaces)
 				*tablespaces = lappend(*tablespaces, ti);
-
-			appendStringInfo(tblspcmapfile, "%s %s\n",
-							 ti->oid, escapedpath.data);
-
-			pfree(escapedpath.data);
 		}
 		FreeDir(tblspcdir);
 

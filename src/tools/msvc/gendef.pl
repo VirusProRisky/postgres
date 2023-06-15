@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021-2022, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
@@ -155,7 +155,7 @@ my $deffile;
 my $tempdir = '.';
 
 GetOptions(
-	'arch:s'    => \$arch,
+	'arch:s' => \$arch,
 	'deffile:s' => \$deffile,
 	'tempdir:s' => \$tempdir,) or usage();
 

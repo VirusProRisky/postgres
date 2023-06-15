@@ -3,7 +3,7 @@
  * pgstat_shmem.c
  *	  Storage of stats entries in shared memory
  *
- * Copyright (c) 2001-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/activity/pgstat_shmem.c
@@ -202,6 +202,10 @@ StatsShmemInit(void)
 		LWLockInitialize(&ctl->checkpointer.lock, LWTRANCHE_PGSTATS_DATA);
 		LWLockInitialize(&ctl->slru.lock, LWTRANCHE_PGSTATS_DATA);
 		LWLockInitialize(&ctl->wal.lock, LWTRANCHE_PGSTATS_DATA);
+
+		for (int i = 0; i < BACKEND_NUM_TYPES; i++)
+			LWLockInitialize(&ctl->io.locks[i],
+							 LWTRANCHE_PGSTATS_DATA);
 	}
 	else
 	{
@@ -861,7 +865,7 @@ pgstat_drop_entry(PgStat_Kind kind, Oid dboid, Oid objoid)
 	if (pgStatEntryRefHash)
 	{
 		PgStat_EntryRefHashEntry *lohashent =
-		pgstat_entry_ref_hash_lookup(pgStatEntryRefHash, key);
+			pgstat_entry_ref_hash_lookup(pgStatEntryRefHash, key);
 
 		if (lohashent)
 			pgstat_release_entry_ref(lohashent->key, lohashent->entry_ref,

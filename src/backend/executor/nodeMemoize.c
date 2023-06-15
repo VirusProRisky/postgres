@@ -3,7 +3,7 @@
  * nodeMemoize.c
  *	  Routines to handle caching of results from parameterized nodes
  *
- * Portions Copyright (c) 2021-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2021-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -289,11 +289,18 @@ prepare_probe_slot(MemoizeState *mstate, MemoizeKey *key)
 
 	if (key == NULL)
 	{
+		ExprContext *econtext = mstate->ss.ps.ps_ExprContext;
+		MemoryContext oldcontext;
+
+		oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+
 		/* Set the probeslot's values based on the current parameter values */
 		for (int i = 0; i < numKeys; i++)
 			pslot->tts_values[i] = ExecEvalExpr(mstate->param_exprs[i],
-												mstate->ss.ps.ps_ExprContext,
+												econtext,
 												&pslot->tts_isnull[i]);
+
+		MemoryContextSwitchTo(oldcontext);
 	}
 	else
 	{

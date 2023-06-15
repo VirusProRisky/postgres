@@ -181,8 +181,10 @@ g_int_compress(PG_FUNCTION_ARGS)
 		PREPAREARR(r);
 
 		if (ARRNELEMS(r) >= 2 * num_ranges)
-			elog(NOTICE, "input array is too big (%d maximum allowed, %d current), use gist__intbig_ops opclass instead",
-				 2 * num_ranges - 1, ARRNELEMS(r));
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("input array is too big (%d maximum allowed, %d current), use gist__intbig_ops opclass instead",
+							2 * num_ranges - 1, ARRNELEMS(r))));
 
 		retval = palloc(sizeof(GISTENTRY));
 		gistentryinit(*retval, PointerGetDatum(r),
@@ -243,7 +245,7 @@ g_int_compress(PG_FUNCTION_ARGS)
 			/*
 			 * shunt everything down to start at the right place
 			 */
-			memmove((void *) &dr[0], (void *) &dr[2 * j], 2 * (len - j) * sizeof(int32));
+			memmove(&dr[0], &dr[2 * j], 2 * (len - j) * sizeof(int32));
 		}
 
 		/*
@@ -260,7 +262,7 @@ g_int_compress(PG_FUNCTION_ARGS)
 					min = ((int64) dr[i] - (int64) dr[i - 1]);
 					cand = i;
 				}
-			memmove((void *) &dr[cand - 1], (void *) &dr[cand + 1], (len - cand - 1) * sizeof(int32));
+			memmove(&dr[cand - 1], &dr[cand + 1], (len - cand - 1) * sizeof(int32));
 			len -= 2;
 		}
 
@@ -270,7 +272,8 @@ g_int_compress(PG_FUNCTION_ARGS)
 		lenr = internal_size(dr, len);
 		if (lenr < 0 || lenr > MAXNUMELTS)
 			ereport(ERROR,
-					(errmsg("data is too sparse, recreate index using gist__intbig_ops opclass instead")));
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("data is too sparse, recreate index using gist__intbig_ops opclass instead")));
 
 		r = resize_intArrayType(r, len);
 		retval = palloc(sizeof(GISTENTRY));
@@ -332,7 +335,8 @@ g_int_decompress(PG_FUNCTION_ARGS)
 	lenr = internal_size(din, lenin);
 	if (lenr < 0 || lenr > MAXNUMELTS)
 		ereport(ERROR,
-				(errmsg("compressed array is too big, recreate index using gist__intbig_ops opclass instead")));
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("compressed array is too big, recreate index using gist__intbig_ops opclass instead")));
 
 	r = new_intArrayType(lenr);
 	dr = ARRPTR(r);
@@ -542,7 +546,7 @@ g_int_picksplit(PG_FUNCTION_ARGS)
 		pfree(union_d);
 		costvector[i - 1].cost = fabsf((size_alpha - size_l) - (size_beta - size_r));
 	}
-	qsort((void *) costvector, maxoff, sizeof(SPLITCOST), comparecost);
+	qsort(costvector, maxoff, sizeof(SPLITCOST), comparecost);
 
 	/*
 	 * Now split up the regions between the two seeds.  An important property

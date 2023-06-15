@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 pgport_sources = [
   'bsearch_arg.c',
   'chklocale.c',
@@ -27,10 +29,12 @@ if host_system == 'windows'
     'kill.c',
     'open.c',
     'system.c',
+    'win32common.c',
     'win32dlopen.c',
     'win32env.c',
     'win32error.c',
     'win32fdatasync.c',
+    'win32fseek.c',
     'win32getrusage.c',
     'win32link.c',
     'win32ntdll.c',
@@ -39,6 +43,10 @@ if host_system == 'windows'
     'win32security.c',
     'win32setlocale.c',
     'win32stat.c',
+  )
+elif host_system == 'cygwin'
+  pgport_sources += files(
+    'dirmod.c',
   )
 endif
 

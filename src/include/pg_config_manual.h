@@ -6,7 +6,7 @@
  * for developers.  If you edit any of these, be sure to do a *full*
  * rebuild (and an initdb if noted).
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/pg_config_manual.h
@@ -228,6 +228,12 @@
 #define PG_CACHE_LINE_SIZE		128
 
 /*
+ * Assumed alignment requirement for direct I/O.  4K corresponds to common
+ * sector and memory page size.
+ */
+#define PG_IO_ALIGN_SIZE		4096
+
+/*
  *------------------------------------------------------------------------
  * The following symbols are for enabling debugging code, not for
  * controlling user-visible features or resource limits.
@@ -311,7 +317,7 @@
 
 /*
  * Recover memory used for relcache entries when invalidated.  See
- * RelationBuildDescr() in src/backend/utils/cache/relcache.c.
+ * RelationBuildDesc() in src/backend/utils/cache/relcache.c.
  *
  * This is active automatically for clobber-cache builds when clobbering is
  * active, but can be overridden here by explicitly defining

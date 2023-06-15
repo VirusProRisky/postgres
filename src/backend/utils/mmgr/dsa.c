@@ -39,7 +39,7 @@
  * empty and be returned to the free page manager, and whole segments can
  * become empty and be returned to the operating system.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -505,7 +505,7 @@ dsa_create_in_place(void *place, size_t size,
 dsa_handle
 dsa_get_handle(dsa_area *area)
 {
-	Assert(area->control->handle != DSM_HANDLE_INVALID);
+	Assert(area->control->handle != DSA_HANDLE_INVALID);
 	return area->control->handle;
 }
 
@@ -554,7 +554,7 @@ dsa_attach_in_place(void *place, dsm_segment *segment)
 {
 	dsa_area   *area;
 
-	area = attach_internal(place, NULL, DSM_HANDLE_INVALID);
+	area = attach_internal(place, NULL, DSA_HANDLE_INVALID);
 
 	/*
 	 * Clean up when the control segment detaches, if a containing DSM segment
@@ -1369,7 +1369,7 @@ init_span(dsa_area *area,
 	if (DsaPointerIsValid(pool->spans[1]))
 	{
 		dsa_area_span *head = (dsa_area_span *)
-		dsa_get_address(area, pool->spans[1]);
+			dsa_get_address(area, pool->spans[1]);
 
 		head->prevspan = span_pointer;
 	}
@@ -2215,7 +2215,7 @@ make_new_segment(dsa_area *area, size_t requested_pages)
 	if (segment_map->header->next != DSA_SEGMENT_INDEX_NONE)
 	{
 		dsa_segment_map *next =
-		get_segment_by_index(area, segment_map->header->next);
+			get_segment_by_index(area, segment_map->header->next);
 
 		Assert(next->header->bin == segment_map->header->bin);
 		next->header->prev = new_index;

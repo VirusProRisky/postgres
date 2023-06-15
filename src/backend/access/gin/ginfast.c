@@ -7,7 +7,7 @@
  *	  transfer pending entries into the regular index structure.  This
  *	  wins because bulk insertion is much more efficient than retail.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -1054,7 +1054,7 @@ gin_clean_pending_list(PG_FUNCTION_ARGS)
 				 errmsg("cannot access temporary indexes of other sessions")));
 
 	/* User must own the index (comparable to privileges needed for VACUUM) */
-	if (!pg_class_ownercheck(indexoid, GetUserId()))
+	if (!object_ownercheck(RelationRelationId, indexoid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_INDEX,
 					   RelationGetRelationName(indexRel));
 

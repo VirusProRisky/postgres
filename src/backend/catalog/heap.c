@@ -3,7 +3,7 @@
  * heap.c
  *	  code to create and destroy POSTGRES heap relations
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -732,12 +732,11 @@ InsertPgAttributeTuples(Relation pg_attribute_rel,
 
 		slot[slotCount]->tts_values[Anum_pg_attribute_attname - 1] = NameGetDatum(&attrs->attname);
 		slot[slotCount]->tts_values[Anum_pg_attribute_atttypid - 1] = ObjectIdGetDatum(attrs->atttypid);
-		slot[slotCount]->tts_values[Anum_pg_attribute_attstattarget - 1] = Int32GetDatum(attrs->attstattarget);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attlen - 1] = Int16GetDatum(attrs->attlen);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attnum - 1] = Int16GetDatum(attrs->attnum);
-		slot[slotCount]->tts_values[Anum_pg_attribute_attndims - 1] = Int32GetDatum(attrs->attndims);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attcacheoff - 1] = Int32GetDatum(-1);
 		slot[slotCount]->tts_values[Anum_pg_attribute_atttypmod - 1] = Int32GetDatum(attrs->atttypmod);
+		slot[slotCount]->tts_values[Anum_pg_attribute_attndims - 1] = Int16GetDatum(attrs->attndims);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attbyval - 1] = BoolGetDatum(attrs->attbyval);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attalign - 1] = CharGetDatum(attrs->attalign);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attstorage - 1] = CharGetDatum(attrs->attstorage);
@@ -749,7 +748,8 @@ InsertPgAttributeTuples(Relation pg_attribute_rel,
 		slot[slotCount]->tts_values[Anum_pg_attribute_attgenerated - 1] = CharGetDatum(attrs->attgenerated);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attisdropped - 1] = BoolGetDatum(attrs->attisdropped);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attislocal - 1] = BoolGetDatum(attrs->attislocal);
-		slot[slotCount]->tts_values[Anum_pg_attribute_attinhcount - 1] = Int32GetDatum(attrs->attinhcount);
+		slot[slotCount]->tts_values[Anum_pg_attribute_attinhcount - 1] = Int16GetDatum(attrs->attinhcount);
+		slot[slotCount]->tts_values[Anum_pg_attribute_attstattarget - 1] = Int16GetDatum(attrs->attstattarget);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attcollation - 1] = ObjectIdGetDatum(attrs->attcollation);
 		if (attoptions && attoptions[natts] != (Datum) 0)
 			slot[slotCount]->tts_values[Anum_pg_attribute_attoptions - 1] = attoptions[natts];
@@ -2615,6 +2615,11 @@ MergeWithExistingConstraint(Relation rel, const char *ccname, Node *expr,
 				con->conislocal = true;
 			else
 				con->coninhcount++;
+
+			if (con->coninhcount < 0)
+				ereport(ERROR,
+						errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						errmsg("too many inheritance parents"));
 		}
 
 		if (is_no_inherit)
@@ -2856,6 +2861,7 @@ CopyStatistics(Oid fromrelid, Oid torelid)
 	SysScanDesc scan;
 	ScanKeyData key[1];
 	Relation	statrel;
+	CatalogIndexState indstate = NULL;
 
 	statrel = table_open(StatisticRelationId, RowExclusiveLock);
 
@@ -2878,13 +2884,20 @@ CopyStatistics(Oid fromrelid, Oid torelid)
 
 		/* update the copy of the tuple and insert it */
 		statform->starelid = torelid;
-		CatalogTupleInsert(statrel, tup);
+
+		/* fetch index information when we know we need it */
+		if (indstate == NULL)
+			indstate = CatalogOpenIndexes(statrel);
+
+		CatalogTupleInsertWithInfo(statrel, tup, indstate);
 
 		heap_freetuple(tup);
 	}
 
 	systable_endscan(scan);
 
+	if (indstate != NULL)
+		CatalogCloseIndexes(indstate);
 	table_close(statrel, RowExclusiveLock);
 }
 

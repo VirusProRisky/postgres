@@ -3,7 +3,7 @@
  * pg_shdepend.c
  *	  routines to support manipulation of the pg_shdepend relation
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -762,7 +762,7 @@ checkSharedDependencies(Oid classId, Oid objectId,
 	 * Sort and report local and shared objects.
 	 */
 	if (numobjects > 1)
-		qsort((void *) objects, numobjects,
+		qsort(objects, numobjects,
 			  sizeof(ShDependObjectInfo), shared_dependency_comparator);
 
 	for (int i = 0; i < numobjects; i++)
@@ -1414,6 +1414,7 @@ shdepDropOwned(List *roleids, DropBehavior behavior)
 					/* FALLTHROUGH */
 
 				case SHARED_DEPENDENCY_OWNER:
+
 					/*
 					 * Save it for deletion below, if it's a local object or a
 					 * role grant. Other shared objects, such as databases,

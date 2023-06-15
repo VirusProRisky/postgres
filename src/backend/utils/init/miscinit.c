@@ -3,7 +3,7 @@
  * miscinit.c
  *	  miscellaneous initialization support stuff
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -135,8 +135,7 @@ InitPostmasterChild(void)
 
 	/* Initialize process-local latch support */
 	InitializeLatchSupport();
-	MyLatch = &LocalLatchData;
-	InitLatch(MyLatch);
+	InitProcessLocalLatch();
 	InitializeLatchWaitSet();
 
 	/*
@@ -160,10 +159,18 @@ InitPostmasterChild(void)
 	pqsignal(SIGQUIT, SignalHandlerForCrashExit);
 
 	sigdelset(&BlockSig, SIGQUIT);
-	PG_SETMASK(&BlockSig);
+	sigprocmask(SIG_SETMASK, &BlockSig, NULL);
 
 	/* Request a signal if the postmaster dies, if possible. */
 	PostmasterDeathSignalInit();
+
+	/* Don't give the pipe to subprograms that we execute. */
+#ifndef WIN32
+	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFD, FD_CLOEXEC) < 0)
+		ereport(FATAL,
+				(errcode_for_socket_access(),
+				 errmsg_internal("could not set postmaster death monitoring pipe to FD_CLOEXEC mode: %m")));
+#endif
 }
 
 /*
@@ -189,8 +196,7 @@ InitStandaloneProcess(const char *argv0)
 
 	/* Initialize process-local latch support */
 	InitializeLatchSupport();
-	MyLatch = &LocalLatchData;
-	InitLatch(MyLatch);
+	InitProcessLocalLatch();
 	InitializeLatchWaitSet();
 
 	/*
@@ -198,7 +204,7 @@ InitStandaloneProcess(const char *argv0)
 	 * But we don't unblock SIGQUIT or provide a default handler for it.
 	 */
 	pqinitmask();
-	PG_SETMASK(&BlockSig);
+	sigprocmask(SIG_SETMASK, &BlockSig, NULL);
 
 	/* Compute paths, no postmaster to inherit from */
 	if (my_exec_path[0] == '\0')
@@ -230,6 +236,13 @@ SwitchToSharedLatch(void)
 	 * condition before waiting for the latch, but a bit care can't hurt.
 	 */
 	SetLatch(MyLatch);
+}
+
+void
+InitProcessLocalLatch(void)
+{
+	MyLatch = &LocalLatchData;
+	InitLatch(MyLatch);
 }
 
 void
@@ -695,6 +708,10 @@ has_rolreplication(Oid roleid)
 {
 	bool		result = false;
 	HeapTuple	utup;
+
+	/* Superusers bypass all permission checking. */
+	if (superuser_arg(roleid))
+		return true;
 
 	utup = SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid));
 	if (HeapTupleIsValid(utup))

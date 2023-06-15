@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021-2022, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 package VSObjectFactory;
 
@@ -19,7 +19,7 @@ use Solution;
 use MSBuildProject;
 
 our (@ISA, @EXPORT);
-@ISA    = qw(Exporter);
+@ISA = qw(Exporter);
 @EXPORT = qw(CreateSolution CreateProject DetermineVisualStudioVersion);
 
 no warnings qw(redefine);    ## no critic

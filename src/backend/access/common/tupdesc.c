@@ -3,7 +3,7 @@
  * tupdesc.c
  *	  POSTGRES tuple descriptor support code
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -597,6 +597,8 @@ TupleDescInitEntry(TupleDesc desc,
 	Assert(PointerIsValid(desc));
 	Assert(attributeNumber >= 1);
 	Assert(attributeNumber <= desc->natts);
+	Assert(attdim >= 0);
+	Assert(attdim <= PG_INT16_MAX);
 
 	/*
 	 * initialize the attribute fields
@@ -667,6 +669,8 @@ TupleDescInitBuiltinEntry(TupleDesc desc,
 	Assert(PointerIsValid(desc));
 	Assert(attributeNumber >= 1);
 	Assert(attributeNumber <= desc->natts);
+	Assert(attdim >= 0);
+	Assert(attdim <= PG_INT16_MAX);
 
 	/* initialize the attribute fields */
 	att = TupleDescAttr(desc, attributeNumber - 1);
@@ -821,12 +825,16 @@ BuildDescForRelation(List *schema)
 		attname = entry->colname;
 		typenameTypeIdAndMod(NULL, entry->typeName, &atttypid, &atttypmod);
 
-		aclresult = pg_type_aclcheck(atttypid, GetUserId(), ACL_USAGE);
+		aclresult = object_aclcheck(TypeRelationId, atttypid, GetUserId(), ACL_USAGE);
 		if (aclresult != ACLCHECK_OK)
 			aclcheck_error_type(aclresult, atttypid);
 
 		attcollation = GetColumnDefCollation(NULL, entry, atttypid);
 		attdim = list_length(entry->typeName->arrayBounds);
+		if (attdim > PG_INT16_MAX)
+			ereport(ERROR,
+					errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					errmsg("too many array dimensions"));
 
 		if (entry->typeName->setof)
 			ereport(ERROR,

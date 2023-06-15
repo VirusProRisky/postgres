@@ -1,7 +1,7 @@
 /*
  * PostgreSQL System Functions
  *
- * Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * src/backend/catalog/system_functions.sql
  *
@@ -65,6 +65,13 @@ CREATE OR REPLACE FUNCTION bit_length(text)
  LANGUAGE sql
  IMMUTABLE PARALLEL SAFE STRICT COST 1
 RETURN octet_length($1) * 8;
+
+CREATE OR REPLACE FUNCTION
+ random_normal(mean float8 DEFAULT 0, stddev float8 DEFAULT 1)
+ RETURNS float8
+ LANGUAGE internal
+ VOLATILE PARALLEL RESTRICTED STRICT COST 1
+AS 'drandom_normal';
 
 CREATE OR REPLACE FUNCTION log(numeric)
  RETURNS numeric
@@ -610,6 +617,8 @@ REVOKE EXECUTE ON FUNCTION pg_backup_stop(boolean) FROM public;
 REVOKE EXECUTE ON FUNCTION pg_create_restore_point(text) FROM public;
 
 REVOKE EXECUTE ON FUNCTION pg_switch_wal() FROM public;
+
+REVOKE EXECUTE ON FUNCTION pg_log_standby_snapshot() FROM public;
 
 REVOKE EXECUTE ON FUNCTION pg_wal_replay_pause() FROM public;
 

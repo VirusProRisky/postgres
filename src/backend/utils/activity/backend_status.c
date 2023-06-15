@@ -2,7 +2,7 @@
  * backend_status.c
  *	  Backend status reporting infrastructure.
  *
- * Copyright (c) 2001-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -283,7 +283,7 @@ pgstat_beinit(void)
  *
  *	Apart from auxiliary processes, MyBackendId, MyDatabaseId,
  *	session userid, and application_name must be set for a
- *	backend (hence, this cannot be combined with pgbestat_beinit).
+ *	backend (hence, this cannot be combined with pgstat_beinit).
  *	Note also that we must be inside a transaction if this isn't an aux
  *	process, as we may need to do encoding conversion on some strings.
  * ----------
@@ -384,6 +384,7 @@ pgstat_bestart(void)
 		lbeentry.st_gss = true;
 		lgssstatus.gss_auth = be_gssapi_get_auth(MyProcPort);
 		lgssstatus.gss_enc = be_gssapi_get_enc(MyProcPort);
+		lgssstatus.gss_delegation = be_gssapi_get_delegation(MyProcPort);
 		if (princ)
 			strlcpy(lgssstatus.gss_princ, princ, NAMEDATALEN);
 	}
@@ -842,7 +843,6 @@ pgstat_read_current_status(void)
 			CHECK_FOR_INTERRUPTS();
 		}
 
-		beentry++;
 		/* Only valid entries get included into the local array */
 		if (localentry->backendStatus.st_procpid > 0)
 		{
@@ -855,7 +855,9 @@ pgstat_read_current_status(void)
 			localentry->backend_id = i;
 			BackendIdGetTransactionIds(i,
 									   &localentry->backend_xid,
-									   &localentry->backend_xmin);
+									   &localentry->backend_xmin,
+									   &localentry->backend_subxact_count,
+									   &localentry->backend_subxact_overflowed);
 
 			localentry++;
 			localappname += NAMEDATALEN;
@@ -869,6 +871,8 @@ pgstat_read_current_status(void)
 #endif
 			localNumBackends++;
 		}
+
+		beentry++;
 	}
 
 	/* Set the pointer only after completion of a valid table */

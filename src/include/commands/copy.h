@@ -4,7 +4,7 @@
  *	  Definitions for using the POSTGRES copy command.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/commands/copy.h
@@ -47,6 +47,8 @@ typedef struct CopyFormatOptions
 	char	   *null_print;		/* NULL marker string (server encoding!) */
 	int			null_print_len; /* length of same */
 	char	   *null_print_client;	/* same converted to file encoding */
+	char	   *default_print;	/* DEFAULT marker string */
+	int			default_print_len;	/* length of same */
 	char	   *delim;			/* column delimiter (must be 1 byte) */
 	char	   *quote;			/* CSV quote char (must be 1 byte) */
 	char	   *escape;			/* CSV escape char (must be 1 byte) */

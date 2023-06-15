@@ -3,7 +3,7 @@
  * fe-print.c
  *	  functions for pretty-printing query results
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * These functions were formerly part of fe-exec.c, but they
@@ -124,7 +124,7 @@ PQprint(FILE *fout, const PGresult *res, const PQprintOpt *po)
 		{
 			int			len;
 			const char *s = (j < numFieldName && po->fieldName[j][0]) ?
-			po->fieldName[j] : PQfname(res, j);
+				po->fieldName[j] : PQfname(res, j);
 
 			fieldNames[j] = s;
 			len = s ? strlen(s) : 0;

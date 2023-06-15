@@ -4,7 +4,7 @@
  * bootparse.y
  *	  yacc grammar for the "bootstrap" mode (BKI file format)
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -306,6 +306,7 @@ Boot_DeclareIndexStmt:
 								$4,
 								InvalidOid,
 								InvalidOid,
+								-1,
 								false,
 								false,
 								false,
@@ -358,6 +359,7 @@ Boot_DeclareUniqueIndexStmt:
 								$5,
 								InvalidOid,
 								InvalidOid,
+								-1,
 								false,
 								false,
 								false,

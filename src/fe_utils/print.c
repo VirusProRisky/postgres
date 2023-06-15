@@ -8,7 +8,7 @@
  * pager open/close functions, all that stuff came with it.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/fe_utils/print.c
@@ -1295,10 +1295,11 @@ print_aligned_vertical_line(const printTableOpt *topt,
 					dwidth = Min(dwidth, Max(0, (int) (output_columns - hwidth)));
 				if (opt_border == 1)
 					dwidth = Min(dwidth, Max(0, (int) (output_columns - hwidth - 3)));
+
 				/*
-				 * Handling the xheader width for border=2 doesn't make
-				 * much sense because this format has an additional
-				 * right border, but keep this for consistency.
+				 * Handling the xheader width for border=2 doesn't make much
+				 * sense because this format has an additional right border,
+				 * but keep this for consistency.
 				 */
 				if (opt_border == 2)
 					dwidth = Min(dwidth, Max(0, (int) (output_columns - hwidth - 7)));

@@ -1,9 +1,11 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 UNICODE_VERSION = '15.0.0'
 
 unicode_data = {}
 unicode_baseurl = 'https://www.unicode.org/Public/@0@/ucd/@1@'
 
-if not wget.found()
+if not wget.found() or not cp.found()
   subdir_done()
 endif
 
@@ -26,6 +28,7 @@ update_unicode_targets += \
   custom_target('unicode_norm_table.h',
     input: [unicode_data['UnicodeData.txt'], unicode_data['CompositionExclusions.txt']],
     output: ['unicode_norm_table.h', 'unicode_norm_hashfunc.h'],
+    depend_files: perfect_hash_pm,
     command: [
       perl, files('generate-unicode_norm_table.pl'),
       '--outdir', '@OUTDIR@', '@INPUT@'],
@@ -36,6 +39,7 @@ update_unicode_targets += \
   custom_target('unicode_nonspacing_table.h',
     input: [unicode_data['UnicodeData.txt']],
     output: ['unicode_nonspacing_table.h'],
+    depend_files: perfect_hash_pm,
     command: [perl, files('generate-unicode_nonspacing_table.pl'), '@INPUT@'],
     build_by_default: false,
     capture: true,
@@ -54,6 +58,7 @@ update_unicode_targets += \
   custom_target('unicode_normprops_table.h',
     input: [unicode_data['DerivedNormalizationProps.txt']],
     output: ['unicode_normprops_table.h'],
+    depend_files: perfect_hash_pm,
     command: [perl, files('generate-unicode_normprops_table.pl'), '@INPUT@'],
     build_by_default: false,
     capture: true,
@@ -98,7 +103,7 @@ update_unicode = custom_target('update-unicode',
   depends: update_unicode_dep,
   output: ['dont-exist'],
   input: update_unicode_targets,
-  command: ['cp', '@INPUT@', '@SOURCE_ROOT@/src/include/common/'],
+  command: [cp, '@INPUT@', '@SOURCE_ROOT@/src/include/common/'],
   build_by_default: false,
   build_always_stale: true,
 )

@@ -2,7 +2,7 @@
  * backend_status.h
  *	  Definitions related to backend status reporting
  *
- * Copyright (c) 2001-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  * src/include/utils/backend_status.h
  * ----------
@@ -77,6 +77,7 @@ typedef struct PgBackendGSSStatus
 	char		gss_princ[NAMEDATALEN]; /* GSSAPI Principal used to auth */
 	bool		gss_auth;		/* If GSSAPI authentication was used */
 	bool		gss_enc;		/* If encryption is being used */
+	bool		gss_delegation;	/* If credentials delegated */
 
 } PgBackendGSSStatus;
 
@@ -266,6 +267,17 @@ typedef struct LocalPgBackendStatus
 	 * not.
 	 */
 	TransactionId backend_xmin;
+
+	/*
+	 * Number of cached subtransactions in the current session.
+	 */
+	int			backend_subxact_count;
+
+	/*
+	 * The number of subtransactions in the current session which exceeded the
+	 * cached subtransaction limit.
+	 */
+	bool		backend_subxact_overflowed;
 } LocalPgBackendStatus;
 
 

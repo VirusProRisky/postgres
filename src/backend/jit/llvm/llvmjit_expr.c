@@ -3,7 +3,7 @@
  * llvmjit_expr.c
  *	  JIT compile expressions.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1047,7 +1047,7 @@ llvm_compile_expr(ExprState *state)
 					else
 					{
 						LLVMValueRef v_value =
-						LLVMBuildLoad(b, v_resvaluep, "");
+							LLVMBuildLoad(b, v_resvaluep, "");
 
 						v_value = LLVMBuildZExt(b,
 												LLVMBuildICmp(b, LLVMIntEQ,
@@ -1848,6 +1848,18 @@ llvm_compile_expr(ExprState *state)
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
+			case EEOP_JSON_CONSTRUCTOR:
+				build_EvalXFunc(b, mod, "ExecEvalJsonConstructor",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
+			case EEOP_IS_JSON:
+				build_EvalXFunc(b, mod, "ExecEvalJsonIsPredicate",
+								v_state, op);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
 			case EEOP_AGGREF:
 				{
 					LLVMValueRef v_aggno;
@@ -2115,8 +2127,7 @@ llvm_compile_expr(ExprState *state)
 
 					/*
 					 * pergroup = &aggstate->all_pergroups
-					 * [op->d.agg_strict_trans_check.setoff]
-					 * [op->d.agg_init_trans_check.transno];
+					 * [op->d.agg_trans.setoff] [op->d.agg_trans.transno];
 					 */
 					v_allpergroupsp =
 						l_load_struct_gep(b, v_aggstatep,
@@ -2308,7 +2319,7 @@ llvm_compile_expr(ExprState *state)
 						params[5] = LLVMBuildTrunc(b, v_transnull,
 												   TypeParamBool, "");
 
-						v_fn = llvm_pg_func(mod, "ExecAggTransReparent");
+						v_fn = llvm_pg_func(mod, "ExecAggCopyTransValue");
 						v_newval =
 							LLVMBuildCall(b, v_fn,
 										  params, lengthof(params),

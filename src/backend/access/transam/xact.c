@@ -5,7 +5,7 @@
  *
  * See src/backend/access/transam/README for more information.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -47,6 +47,7 @@
 #include "pgstat.h"
 #include "replication/logical.h"
 #include "replication/logicallauncher.h"
+#include "replication/logicalworker.h"
 #include "replication/origin.h"
 #include "replication/snapbuild.h"
 #include "replication/syncrep.h"
@@ -1373,12 +1374,6 @@ RecordTransactionCommit(void)
 					  replorigin_session_origin != DoNotReplicateId);
 
 		/*
-		 * Begin commit critical section and insert the commit XLOG record.
-		 */
-		/* Tell bufmgr and smgr to prepare for commit */
-		BufmgrCommit();
-
-		/*
 		 * Mark ourselves as within our "commit critical section".  This
 		 * forces any concurrent checkpoint to wait until we've updated
 		 * pg_xact.  Without this, it is possible for the checkpoint to set
@@ -1399,6 +1394,9 @@ RecordTransactionCommit(void)
 		START_CRIT_SECTION();
 		MyProc->delayChkptFlags |= DELAY_CHKPT_START;
 
+		/*
+		 * Insert the commit XLOG record.
+		 */
 		XactLogCommitRecord(GetCurrentTransactionStopTimestamp(),
 							nchildren, children, nrels, rels,
 							ndroppedstats, droppedstats,
@@ -1712,6 +1710,7 @@ RecordTransactionAbort(bool isSubXact)
 	int			nchildren;
 	TransactionId *children;
 	TimestampTz xact_time;
+	bool		replorigin;
 
 	/*
 	 * If we haven't been assigned an XID, nobody will care whether we aborted
@@ -1742,6 +1741,13 @@ RecordTransactionAbort(bool isSubXact)
 		elog(PANIC, "cannot abort transaction %u, it was already committed",
 			 xid);
 
+	/*
+	 * Are we using the replication origins feature?  Or, in other words, are
+	 * we replaying remote actions?
+	 */
+	replorigin = (replorigin_session_origin != InvalidRepOriginId &&
+				  replorigin_session_origin != DoNotReplicateId);
+
 	/* Fetch the data we need for the abort record */
 	nrels = smgrGetPendingDeletes(false, &rels);
 	nchildren = xactGetCommittedChildren(&children);
@@ -1764,6 +1770,11 @@ RecordTransactionAbort(bool isSubXact)
 					   ndroppedstats, droppedstats,
 					   MyXactFlags, InvalidTransactionId,
 					   NULL);
+
+	if (replorigin)
+		/* Move LSNs forward for this replication origin */
+		replorigin_session_advance(replorigin_session_origin_lsn,
+								   XactLastRecEnd);
 
 	/*
 	 * Report the latest async abort LSN, so that the WAL writer knows to
@@ -2360,6 +2371,7 @@ CommitTransaction(void)
 	AtEOXact_PgStat(true, is_parallel_worker);
 	AtEOXact_Snapshot(true, false);
 	AtEOXact_ApplyLauncher(true);
+	AtEOXact_LogicalRepWorkers(true);
 	pgstat_report_xact_timestamp(0);
 
 	CurrentResourceOwner = NULL;
@@ -2521,9 +2533,6 @@ PrepareTransaction(void)
 
 	prepared_at = GetCurrentTimestamp();
 
-	/* Tell bufmgr and smgr to prepare for commit */
-	BufmgrCommit();
-
 	/*
 	 * Reserve the GID for this transaction. This could fail if the requested
 	 * GID is invalid or already in use.
@@ -2647,6 +2656,9 @@ PrepareTransaction(void)
 	AtEOXact_HashTables(true);
 	/* don't call AtEOXact_PgStat here; we fixed pgstat state above */
 	AtEOXact_Snapshot(true, true);
+	/* we treat PREPARE as ROLLBACK so far as waking workers goes */
+	AtEOXact_ApplyLauncher(false);
+	AtEOXact_LogicalRepWorkers(false);
 	pgstat_report_xact_timestamp(0);
 
 	CurrentResourceOwner = NULL;
@@ -2707,8 +2719,7 @@ AbortTransaction(void)
 	pgstat_report_wait_end();
 	pgstat_progress_end_command();
 
-	/* Clean up buffer I/O and buffer context locks, too */
-	AbortBufferIO();
+	/* Clean up buffer context locks, too */
 	UnlockBuffers();
 
 	/* Reset WAL record construction state */
@@ -2737,7 +2748,7 @@ AbortTransaction(void)
 	 * handler.  We do this fairly early in the sequence so that the timeout
 	 * infrastructure will be functional if needed while aborting.
 	 */
-	PG_SETMASK(&UnBlockSig);
+	sigprocmask(SIG_SETMASK, &UnBlockSig, NULL);
 
 	/*
 	 * check the current transaction state
@@ -2860,6 +2871,7 @@ AbortTransaction(void)
 		AtEOXact_HashTables(false);
 		AtEOXact_PgStat(false, is_parallel_worker);
 		AtEOXact_ApplyLauncher(false);
+		AtEOXact_LogicalRepWorkers(false);
 		pgstat_report_xact_timestamp(0);
 	}
 
@@ -3140,10 +3152,9 @@ CommitTransactionCommand(void)
 			break;
 
 			/*
-			 * The user issued a SAVEPOINT inside a transaction block.
-			 * Start a subtransaction.  (DefineSavepoint already did
-			 * PushTransaction, so as to have someplace to put the SUBBEGIN
-			 * state.)
+			 * The user issued a SAVEPOINT inside a transaction block. Start a
+			 * subtransaction.  (DefineSavepoint already did PushTransaction,
+			 * so as to have someplace to put the SUBBEGIN state.)
 			 */
 		case TBLOCK_SUBBEGIN:
 			StartSubTransaction();
@@ -3448,6 +3459,10 @@ AbortCurrentTransaction(void)
  *	a transaction block, typically because they have non-rollback-able
  *	side effects or do internal commits.
  *
+ *	If this routine completes successfully, then the calling statement is
+ *	guaranteed that if it completes without error, its results will be
+ *	committed immediately.
+ *
  *	If we have already started a transaction block, issue an error; also issue
  *	an error if we appear to be running inside a user-defined function (which
  *	could issue more commands and possibly cause a failure after the statement
@@ -3482,6 +3497,16 @@ PreventInTransactionBlock(bool isTopLevel, const char *stmtType)
 				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
 		/* translator: %s represents an SQL statement name */
 				 errmsg("%s cannot run inside a subtransaction",
+						stmtType)));
+
+	/*
+	 * inside a pipeline that has started an implicit transaction?
+	 */
+	if (MyXactFlags & XACT_FLAGS_PIPELINING)
+		ereport(ERROR,
+				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+		/* translator: %s represents an SQL statement name */
+				 errmsg("%s cannot be executed within a pipeline",
 						stmtType)));
 
 	/*
@@ -3573,6 +3598,12 @@ CheckTransactionBlock(bool isTopLevel, bool throwError, const char *stmtType)
  *	a transaction block than when running as single commands.  ANALYZE is
  *	currently the only example.
  *
+ *	If this routine returns "false", then the calling statement is allowed
+ *	to perform internal transaction-commit-and-start cycles; there is not a
+ *	risk of messing up any transaction already in progress.  (Note that this
+ *	is not the identical guarantee provided by PreventInTransactionBlock,
+ *	since we will not force a post-statement commit.)
+ *
  *	isTopLevel: passed down from ProcessUtility to determine whether we are
  *	inside a function.
  */
@@ -3589,19 +3620,15 @@ IsInTransactionBlock(bool isTopLevel)
 	if (IsSubTransaction())
 		return true;
 
+	if (MyXactFlags & XACT_FLAGS_PIPELINING)
+		return true;
+
 	if (!isTopLevel)
 		return true;
 
 	if (CurrentTransactionState->blockState != TBLOCK_DEFAULT &&
 		CurrentTransactionState->blockState != TBLOCK_STARTED)
 		return true;
-
-	/*
-	 * If we tell the caller we're not in a transaction block, then inform
-	 * postgres.c that it had better commit when the statement is done.
-	 * Otherwise our report could be a lie.
-	 */
-	MyXactFlags |= XACT_FLAGS_NEEDIMMEDIATECOMMIT;
 
 	return false;
 }
@@ -4668,9 +4695,9 @@ RollbackAndReleaseCurrentSubTransaction(void)
 
 	s = CurrentTransactionState;	/* changed by pop */
 	Assert(s->blockState == TBLOCK_SUBINPROGRESS ||
-				s->blockState == TBLOCK_INPROGRESS ||
-				s->blockState == TBLOCK_IMPLICIT_INPROGRESS ||
-				s->blockState == TBLOCK_STARTED);
+		   s->blockState == TBLOCK_INPROGRESS ||
+		   s->blockState == TBLOCK_IMPLICIT_INPROGRESS ||
+		   s->blockState == TBLOCK_STARTED);
 }
 
 /*
@@ -5051,7 +5078,6 @@ AbortSubTransaction(void)
 
 	pgstat_report_wait_end();
 	pgstat_progress_end_command();
-	AbortBufferIO();
 	UnlockBuffers();
 
 	/* Reset WAL record construction state */
@@ -5080,7 +5106,7 @@ AbortSubTransaction(void)
 	 * handler.  We do this fairly early in the sequence so that the timeout
 	 * infrastructure will be functional if needed while aborting.
 	 */
-	PG_SETMASK(&UnBlockSig);
+	sigprocmask(SIG_SETMASK, &UnBlockSig, NULL);
 
 	/*
 	 * check the current transaction state
@@ -5851,11 +5877,10 @@ XactLogAbortRecord(TimestampTz abort_time,
 	}
 
 	/*
-	 * Dump transaction origin information only for abort prepared. We need
-	 * this during recovery to update the replication origin progress.
+	 * Dump transaction origin information. We need this during recovery to
+	 * update the replication origin progress.
 	 */
-	if ((replorigin_session_origin != InvalidRepOriginId) &&
-		TransactionIdIsValid(twophase_xid))
+	if (replorigin_session_origin != InvalidRepOriginId)
 	{
 		xl_xinfo.xinfo |= XACT_XINFO_HAS_ORIGIN;
 
@@ -5912,8 +5937,8 @@ XactLogAbortRecord(TimestampTz abort_time,
 	if (xl_xinfo.xinfo & XACT_XINFO_HAS_ORIGIN)
 		XLogRegisterData((char *) (&xl_origin), sizeof(xl_xact_origin));
 
-	if (TransactionIdIsValid(twophase_xid))
-		XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
+	/* Include the replication origin */
+	XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
 
 	return XLogInsert(RM_XACT_ID, info);
 }

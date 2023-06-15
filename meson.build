@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 # Entry point for building PostgreSQL with meson
 #
 # Good starting points for writing meson.build files are:
@@ -6,7 +8,7 @@
 
 project('postgresql',
   ['c'],
-  version: '16devel',
+  version: '16beta1',
   license: 'PostgreSQL',
 
   # We want < 0.56 for python 3.5 compatibility on old platforms. EPEL for
@@ -16,10 +18,10 @@ project('postgresql',
   default_options: [
     'warning_level=1', #-Wall equivalent
     'b_pch=false',
-    'buildtype=release',
+    'buildtype=debugoptimized', # -O2 + debug
     # For compatibility with the autoconf build, set a default prefix. This
     # works even on windows, where it's a drive-relative path (i.e. when on
-    # d:/sompath it'll install to d:/usr/local/pgsql)
+    # d:/somepath it'll install to d:/usr/local/pgsql)
     'prefix=/usr/local/pgsql',
   ]
 )
@@ -41,6 +43,7 @@ cc = meson.get_compiler('c')
 
 not_found_dep = dependency('', required: false)
 thread_dep = dependency('threads')
+auto_features = get_option('auto_features')
 
 
 
@@ -143,12 +146,11 @@ cdata.set_quoted('PACKAGE_TARNAME', 'postgresql')
 
 pg_version += get_option('extra_version')
 cdata.set_quoted('PG_VERSION', pg_version)
-cdata.set_quoted('PG_VERSION_STR', 'PostgreSQL @0@ on @1@, compiled by @2@-@3@'.format(
-  pg_version, build_machine.cpu_family(), cc.get_id(), cc.version()))
 cdata.set_quoted('PG_MAJORVERSION', pg_version_major.to_string())
 cdata.set('PG_MAJORVERSION_NUM', pg_version_major)
 cdata.set('PG_MINORVERSION_NUM', pg_version_minor)
 cdata.set('PG_VERSION_NUM', pg_version_num)
+# PG_VERSION_STR is built later, it depends compiler test results
 cdata.set_quoted('CONFIGURE_ARGS', '')
 
 
@@ -210,7 +212,12 @@ if host_system == 'aix'
   memset_loop_limit = 0
 
 elif host_system == 'cygwin'
+  sema_kind = 'unnamed_posix'
   cppflags += '-D_GNU_SOURCE'
+  dlsuffix = '.dll'
+  mod_link_args_fmt = ['@0@']
+  mod_link_with_name = 'lib@0@.exe.a'
+  mod_link_with_dir = 'libdir'
 
 elif host_system == 'darwin'
   dlsuffix = '.dylib'
@@ -226,8 +233,10 @@ elif host_system == 'darwin'
   sysroot_args = [files('src/tools/darwin_sysroot'), get_option('darwin_sysroot')]
   pg_sysroot = run_command(sysroot_args, check:true).stdout().strip()
   message('darwin sysroot: @0@'.format(pg_sysroot))
-  cflags += ['-isysroot', pg_sysroot]
-  ldflags += ['-isysroot', pg_sysroot]
+  if pg_sysroot != ''
+    cflags += ['-isysroot', pg_sysroot]
+    ldflags += ['-isysroot', pg_sysroot]
+  endif
   # meson defaults to -Wl,-undefined,dynamic_lookup for modules, which we
   # don't want because a) it's different from what we do for autoconf, b) it
   # causes warnings starting in macOS Ventura
@@ -327,14 +336,13 @@ prove = find_program(get_option('PROVE'), native: true, required: false)
 tar = find_program(get_option('TAR'), native: true)
 gzip = find_program(get_option('GZIP'), native: true)
 program_lz4 = find_program(get_option('LZ4'), native: true, required: false)
-touch = find_program('touch', native: true)
 openssl = find_program(get_option('OPENSSL'), native: true, required: false)
 program_zstd = find_program(get_option('ZSTD'), native: true, required: false)
 dtrace = find_program(get_option('DTRACE'), native: true, required: get_option('dtrace'))
 missing = find_program('config/missing', native: true)
-
-# used by PGXS
-install_sh = find_program('config/install-sh', native: true)
+cp = find_program('cp', required: false, native: true)
+xmllint_bin = find_program(get_option('XMLLINT'), native: true, required: false)
+xsltproc_bin = find_program(get_option('XSLTPROC'), native: true, required: false)
 
 bison_flags = []
 if bison.found()
@@ -364,6 +372,8 @@ flex_cmd = [python, flex_wrapper,
 
 wget = find_program('wget', required: false, native: true)
 wget_flags = ['-O', '@OUTPUT0@', '--no-use-server-timestamps']
+
+install_files = files('src/tools/install_files')
 
 
 
@@ -418,7 +428,19 @@ meson_bin = find_program(meson_binpath, native: true)
 
 cdata.set('USE_ASSERT_CHECKING', get_option('cassert') ? 1 : false)
 
-cdata.set('BLCKSZ', get_option('blocksize').to_int() * 1024, description:
+blocksize = get_option('blocksize').to_int() * 1024
+
+if get_option('segsize_blocks') != 0
+  if get_option('segsize') != 1
+    warning('both segsize and segsize_blocks specified, segsize_blocks wins')
+  endif
+
+  segsize = get_option('segsize_blocks')
+else
+  segsize = (get_option('segsize') * 1024 * 1024 * 1024) / blocksize
+endif
+
+cdata.set('BLCKSZ', blocksize, description:
 '''Size of a disk block --- this also limits the size of a tuple. You can set
    it bigger if you need bigger tuples (although TOAST should reduce the need
    to have large tuples, since fields can be spread across multiple tuples).
@@ -428,7 +450,7 @@ cdata.set('BLCKSZ', get_option('blocksize').to_int() * 1024, description:
    Changing BLCKSZ requires an initdb.''')
 
 cdata.set('XLOG_BLCKSZ', get_option('wal_blocksize').to_int() * 1024)
-cdata.set('RELSEG_SIZE', get_option('segsize') * 131072)
+cdata.set('RELSEG_SIZE', segsize)
 cdata.set('DEF_PGPORT', get_option('pgport'))
 cdata.set_quoted('DEF_PGPORT_STR', get_option('pgport').to_string())
 cdata.set_quoted('PG_KRB_SRVNAM', get_option('krb_srvnam'))
@@ -450,22 +472,24 @@ pkg = 'postgresql'
 
 dir_prefix = get_option('prefix')
 
+dir_prefix_contains_pg = (dir_prefix.contains('pgsql') or dir_prefix.contains('postgres'))
+
 dir_bin = get_option('bindir')
 
 dir_data = get_option('datadir')
-if not (dir_data.contains('pgsql') or dir_data.contains('postgres'))
+if not (dir_prefix_contains_pg or dir_data.contains('pgsql') or dir_data.contains('postgres'))
   dir_data = dir_data / pkg
 endif
 
 dir_sysconf = get_option('sysconfdir')
-if not (dir_sysconf.contains('pgsql') or dir_sysconf.contains('postgres'))
+if not (dir_prefix_contains_pg or dir_sysconf.contains('pgsql') or dir_sysconf.contains('postgres'))
   dir_sysconf = dir_sysconf / pkg
 endif
 
 dir_lib = get_option('libdir')
 
 dir_lib_pkg = dir_lib
-if not (dir_lib_pkg.contains('pgsql') or dir_lib_pkg.contains('postgres'))
+if not (dir_prefix_contains_pg or dir_lib_pkg.contains('pgsql') or dir_lib_pkg.contains('postgres'))
   dir_lib_pkg = dir_lib_pkg / pkg
 endif
 
@@ -475,7 +499,7 @@ dir_include = get_option('includedir')
 
 dir_include_pkg = dir_include
 dir_include_pkg_rel = ''
-if not (dir_include_pkg.contains('pgsql') or dir_include_pkg.contains('postgres'))
+if not (dir_prefix_contains_pg or dir_include_pkg.contains('pgsql') or dir_include_pkg.contains('postgres'))
   dir_include_pkg = dir_include_pkg / pkg
   dir_include_pkg_rel = pkg
 endif
@@ -484,7 +508,7 @@ dir_man = get_option('mandir')
 
 # FIXME: These used to be separately configurable - worth adding?
 dir_doc = get_option('datadir') / 'doc' / 'postgresql'
-dir_doc_html = dir_doc
+dir_doc_html = dir_doc / 'html'
 
 dir_locale = get_option('localedir')
 
@@ -546,6 +570,39 @@ endif
 
 
 ###############################################################
+# Option: docs in HTML and man page format
+###############################################################
+
+docs_opt = get_option('docs')
+docs_dep = not_found_dep
+if not docs_opt.disabled()
+  if xmllint_bin.found() and xsltproc_bin.found()
+    docs_dep = declare_dependency()
+  elif docs_opt.enabled()
+    error('missing required tools for docs in HTML / man page format')
+  endif
+endif
+
+
+
+###############################################################
+# Option: docs in PDF format
+###############################################################
+
+docs_pdf_opt = get_option('docs_pdf')
+docs_pdf_dep = not_found_dep
+if not docs_pdf_opt.disabled()
+  fop = find_program(get_option('FOP'), native: true, required: docs_pdf_opt)
+  if xmllint_bin.found() and xsltproc_bin.found() and fop.found()
+    docs_pdf_dep = declare_dependency()
+  elif docs_pdf_opt.enabled()
+    error('missing required tools for docs in PDF format')
+  endif
+endif
+
+
+
+###############################################################
 # Library: GSSAPI
 ###############################################################
 
@@ -567,14 +624,24 @@ if not gssapiopt.disabled()
   endif
 
   if not have_gssapi
-  elif cc.has_function('gss_init_sec_context', dependencies: gssapi,
+  elif cc.check_header('gssapi/gssapi_ext.h', dependencies: gssapi, required: false,
+      args: test_c_args, include_directories: postgres_inc)
+    cdata.set('HAVE_GSSAPI_GSSAPI_EXT_H', 1)
+  elif cc.check_header('gssapi_ext.h', args: test_c_args, dependencies: gssapi, required: gssapiopt)
+    cdata.set('HAVE_GSSAPI_EXT_H', 1)
+  else
+    have_gssapi = false
+  endif
+
+  if not have_gssapi
+  elif cc.has_function('gss_store_cred_into', dependencies: gssapi,
       args: test_c_args, include_directories: postgres_inc)
     cdata.set('ENABLE_GSS', 1)
 
     krb_srvtab = 'FILE:/@0@/krb5.keytab)'.format(get_option('sysconfdir'))
     cdata.set_quoted('PG_KRB_SRVTAB', krb_srvtab)
   elif gssapiopt.enabled()
-    error('''could not find function 'gss_init_sec_context' required for GSSAPI''')
+    error('''could not find function 'gss_store_cred_into' required for GSSAPI''')
   else
     have_gssapi = false
   endif
@@ -909,6 +976,12 @@ if not perlopt.disabled()
 
     if host_system == 'windows'
       perl_ccflags += ['-DPLPERL_HAVE_UID_GID']
+
+      if cc.get_id() == 'msvc'
+        # prevent binary mismatch between MSVC built plperl and Strawberry or
+        # msys ucrt perl libraries
+        perl_ccflags += ['-DNO_THREAD_SAFE_LOCALE']
+      endif
     endif
 
     message('CCFLAGS recommended by perl: @0@'.format(perl_ccflags_r))
@@ -1058,7 +1131,7 @@ if not get_option('readline').disabled()
 
     if not at_least_one_header_found
       error('''readline header not found
-If you have @0@ already installed, see see meson-log/meson-log.txt for details on the
+If you have @0@ already installed, see meson-log/meson-log.txt for details on the
 failure. It is possible the compiler isn't looking in the proper directory.
 Use -Dreadline=false to disable readline support.'''.format(readline_dep))
     endif
@@ -1148,7 +1221,16 @@ cdata.set('USE_SYSTEMD', systemd.found() ? 1 : false)
 # Library: SSL
 ###############################################################
 
-if get_option('ssl') == 'openssl'
+ssl = not_found_dep
+ssl_library = 'none'
+sslopt = get_option('ssl')
+
+if sslopt == 'auto' and auto_features.disabled()
+  sslopt = 'none'
+endif
+
+if sslopt in ['auto', 'openssl']
+  openssl_required = (sslopt == 'openssl')
 
   # Try to find openssl via pkg-config et al, if that doesn't work
   # (e.g. because it's provided as part of the OS, like on FreeBSD), look for
@@ -1156,69 +1238,91 @@ if get_option('ssl') == 'openssl'
 
   # via pkg-config et al
   ssl = dependency('openssl', required: false)
+  # only meson >= 0.57 supports declare_dependency() in cc.has_function(), so
+  # we pass cc.find_library() results if necessary
+  ssl_int = []
 
   # via library + headers
   if not ssl.found()
     ssl_lib = cc.find_library('ssl',
       dirs: test_lib_d,
       header_include_directories: postgres_inc,
-      has_headers: ['openssl/ssl.h', 'openssl/err.h'])
+      has_headers: ['openssl/ssl.h', 'openssl/err.h'],
+      required: openssl_required)
     crypto_lib = cc.find_library('crypto',
       dirs: test_lib_d,
-      header_include_directories: postgres_inc)
-    ssl_int = [ssl_lib, crypto_lib]
-
-    ssl = declare_dependency(dependencies: ssl_int,
-                             include_directories: postgres_inc)
-  else
-    cc.has_header('openssl/ssl.h', args: test_c_args, dependencies: ssl, required: true)
-    cc.has_header('openssl/err.h', args: test_c_args, dependencies: ssl, required: true)
-
+      required: openssl_required)
+    if ssl_lib.found() and crypto_lib.found()
+      ssl_int = [ssl_lib, crypto_lib]
+      ssl = declare_dependency(dependencies: ssl_int, include_directories: postgres_inc)
+    endif
+  elif cc.has_header('openssl/ssl.h', args: test_c_args, dependencies: ssl, required: openssl_required) and \
+       cc.has_header('openssl/err.h', args: test_c_args, dependencies: ssl, required: openssl_required)
     ssl_int = [ssl]
+  else
+    ssl = not_found_dep
   endif
 
-  check_funcs = [
-    ['CRYPTO_new_ex_data', {'required': true}],
-    ['SSL_new', {'required': true}],
+  if ssl.found()
+    check_funcs = [
+      ['CRYPTO_new_ex_data', {'required': true}],
+      ['SSL_new', {'required': true}],
 
-    # Function introduced in OpenSSL 1.0.2.
-    ['X509_get_signature_nid'],
+      # Functions introduced in OpenSSL 1.0.2.
+      ['X509_get_signature_nid'],
+      ['SSL_CTX_set_cert_cb'], # not in LibreSSL
 
-    # Functions introduced in OpenSSL 1.1.0. We used to check for
-    # OPENSSL_VERSION_NUMBER, but that didn't work with 1.1.0, because LibreSSL
-    # defines OPENSSL_VERSION_NUMBER to claim version 2.0.0, even though it
-    # doesn't have these OpenSSL 1.1.0 functions. So check for individual
-    # functions.
-    ['OPENSSL_init_ssl'],
-    ['BIO_get_data'],
-    ['BIO_meth_new'],
-    ['ASN1_STRING_get0_data'],
-    ['HMAC_CTX_new'],
-    ['HMAC_CTX_free'],
+      # Functions introduced in OpenSSL 1.1.0. We used to check for
+      # OPENSSL_VERSION_NUMBER, but that didn't work with 1.1.0, because LibreSSL
+      # defines OPENSSL_VERSION_NUMBER to claim version 2.0.0, even though it
+      # doesn't have these OpenSSL 1.1.0 functions. So check for individual
+      # functions.
+      ['OPENSSL_init_ssl'],
+      ['BIO_get_data'],
+      ['BIO_meth_new'],
+      ['ASN1_STRING_get0_data'],
+      ['HMAC_CTX_new'],
+      ['HMAC_CTX_free'],
 
-    # OpenSSL versions before 1.1.0 required setting callback functions, for
-    # thread-safety. In 1.1.0, it's no longer required, and CRYPTO_lock()
-    # function was removed.
-    ['CRYPTO_lock'],
-  ]
+      # OpenSSL versions before 1.1.0 required setting callback functions, for
+      # thread-safety. In 1.1.0, it's no longer required, and CRYPTO_lock()
+      # function was removed.
+      ['CRYPTO_lock'],
 
-  foreach c : check_funcs
-    func = c.get(0)
-    val = cc.has_function(func, args: test_c_args, dependencies: ssl_int)
-    required = c.get(1, {}).get('required', false)
-    if required and not val
-      error('openssl function @0@ is required'.format(func))
-    elif not required
-      cdata.set('HAVE_' + func.to_upper(), val ? 1 : false)
+      # Function introduced in OpenSSL 1.1.1
+      ['X509_get_signature_info'],
+    ]
+
+    are_openssl_funcs_complete = true
+    foreach c : check_funcs
+      func = c.get(0)
+      val = cc.has_function(func, args: test_c_args, dependencies: ssl_int)
+      required = c.get(1, {}).get('required', false)
+      if required and not val
+        are_openssl_funcs_complete = false
+        if openssl_required
+          error('openssl function @0@ is required'.format(func))
+        endif
+        break
+      elif not required
+        cdata.set('HAVE_' + func.to_upper(), val ? 1 : false)
+      endif
+    endforeach
+
+    if are_openssl_funcs_complete
+      cdata.set('USE_OPENSSL', 1,
+                description: 'Define to 1 to build with OpenSSL support. (-Dssl=openssl)')
+      cdata.set('OPENSSL_API_COMPAT', '0x10001000L',
+                description: '''Define to the OpenSSL API version in use. This avoids deprecation warnings from newer OpenSSL versions.''')
+      ssl_library = 'openssl'
+    else
+      ssl = not_found_dep
     endif
-  endforeach
+  endif
+endif
 
-  cdata.set('USE_OPENSSL', 1,
-            description: 'Define to 1 to build with OpenSSL support. (-Dssl=openssl)')
-  cdata.set('OPENSSL_API_COMPAT', '0x10001000L',
-            description: '''Define to the OpenSSL API version in use. This avoids deprecation warnings from newer OpenSSL versions.''')
-else
-  ssl = not_found_dep
+if sslopt == 'auto' and auto_features.enabled() and not ssl.found()
+  error('no SSL library found')
 endif
 
 
@@ -1242,7 +1346,7 @@ if uuidopt != 'none'
   elif uuidopt == 'ossp'
     uuid = dependency('ossp-uuid', required: true)
     uuidfunc = 'uuid_export'
-    uuidheader = 'ossp/uuid.h'
+    uuidheader = 'uuid.h'
   else
     error('huh')
   endif
@@ -1731,11 +1835,10 @@ endif
 
 # A few places with imported code get a pass on -Wdeclaration-after-statement, remember
 # the result for them
+cflags_no_decl_after_statement = []
 if cc.has_argument('-Wdeclaration-after-statement')
   cflags_warn += '-Wdeclaration-after-statement'
-  using_declaration_after_statement_warning = true
-else
-  using_declaration_after_statement_warning = false
+  cflags_no_decl_after_statement += '-Wno-declaration-after-statement'
 endif
 
 
@@ -1755,6 +1858,9 @@ negative_warning_flags = [
   # Similarly disable useless truncation warnings from gcc 8+
   'format-truncation',
   'stringop-truncation',
+
+  # Suppress clang 16's strict warnings about function casts
+  'cast-function-type-strict',
 
   # To make warning_level=2 / -Wextra work, we'd need at least the following
   # 'clobbered',
@@ -2088,20 +2194,6 @@ foreach c : decl_checks
 endforeach
 
 
-if cc.has_type('struct cmsgcred',
-    args: test_c_args + ['@0@'.format(cdata.get('HAVE_SYS_UCRED_H')) == 'false' ? '' : '-DHAVE_SYS_UCRED_H'],
-    include_directories: postgres_inc,
-    prefix: '''
-#include <sys/socket.h>
-#include <sys/param.h>
-#ifdef HAVE_SYS_UCRED_H
-#include <sys/ucred.h>
-#endif''')
-  cdata.set('HAVE_STRUCT_CMSGCRED', 1)
-else
-  cdata.set('HAVE_STRUCT_CMSGCRED', false)
-endif
-
 if cc.has_type('struct option',
     args: test_c_args, include_directories: postgres_inc,
     prefix: '@0@'.format(cdata.get('HAVE_GETOPT_H')) == '1' ? '#include <getopt.h>' : '')
@@ -2193,12 +2285,15 @@ endif
 
 # Check for the locale_t type and find the right header file.  macOS
 # needs xlocale.h; standard is locale.h, but glibc also has an
-# xlocale.h file that we should not use.
+# xlocale.h file that we should not use.  MSVC has a replacement
+# defined in src/include/port/win32_port.h.
 if cc.has_type('locale_t', prefix: '#include <locale.h>')
   cdata.set('HAVE_LOCALE_T', 1)
 elif cc.has_type('locale_t', prefix: '#include <xlocale.h>')
   cdata.set('HAVE_LOCALE_T', 1)
   cdata.set('LOCALE_T_IN_XLOCALE', 1)
+elif cc.get_id() == 'msvc'
+  cdata.set('HAVE_LOCALE_T', 1)
 endif
 
 # Check if the C compiler understands typeof or a variant.  Define
@@ -2262,23 +2357,6 @@ endif
 cdata.set('pg_restrict', '__restrict')
 
 
-if cc.links('''
-#include <machine/vmparam.h>
-#include <sys/exec.h>
-
-int main(void)
-{
-    PS_STRINGS->ps_nargvstr = 1;
-    PS_STRINGS->ps_argvstr = "foo";
-}
-''',
-  name: 'PS_STRINGS', args: test_c_args)
-  cdata.set('HAVE_PS_STRINGS', 1)
-else
-  cdata.set('HAVE_PS_STRINGS', false)
-endif
-
-
 # Most libraries are included only if they demonstrably provide a function we
 # need, but libm is an exception: always include it, because there are too
 # many compilers that play cute optimization games that will break probes for
@@ -2301,8 +2379,8 @@ gnugetopt_dep = cc.find_library('gnugetopt', required: false)
 #   (i.e., allow '-' as a flag character), so use our version on those platforms
 # - We want to use system's getopt_long() only if the system provides struct
 #   option
-always_replace_getopt = host_system in ['windows', 'openbsd', 'solaris']
-always_replace_getopt_long = host_system == 'windows' or not cdata.has('HAVE_STRUCT_OPTION')
+always_replace_getopt = host_system in ['windows', 'cygwin', 'openbsd', 'solaris']
+always_replace_getopt_long = host_system in ['windows', 'cygwin'] or not cdata.has('HAVE_STRUCT_OPTION')
 
 # Required on BSDs
 execinfo_dep = cc.find_library('execinfo', required: false)
@@ -2411,6 +2489,13 @@ if cc.has_function('syslog', args: test_c_args) and \
 endif
 
 
+# MSVC has replacements defined in src/include/port/win32_port.h.
+if cc.get_id() == 'msvc'
+  cdata.set('HAVE_WCSTOMBS_L', 1)
+  cdata.set('HAVE_MBSTOWCS_L', 1)
+endif
+
+
 # if prerequisites for unnamed posix semas aren't fulfilled, fall back to sysv
 # semaphores
 if sema_kind == 'unnamed_posix' and \
@@ -2423,6 +2508,15 @@ cdata.set('USE_@0@_SEMAPHORES'.format(sema_kind.to_upper()), 1)
 
 cdata.set('MEMSET_LOOP_LIMIT', memset_loop_limit)
 cdata.set_quoted('DLSUFFIX', dlsuffix)
+
+
+# built later than the rest of the version metadata, we need SIZEOF_VOID_P
+cdata.set_quoted('PG_VERSION_STR',
+  'PostgreSQL @0@ on @1@-@2@, compiled by @3@-@4@, @5@-bit'.format(
+    pg_version, host_machine.cpu_family(), host_system,
+    cc.get_id(), cc.version(), cdata.get('SIZEOF_VOID_P') * 8,
+  )
+)
 
 
 
@@ -2497,6 +2591,7 @@ bin_targets = []
 pl_targets = []
 contrib_targets = []
 testprep_targets = []
+nls_targets = []
 
 
 # Define the tests to distribute them to the correct test styles later
@@ -2542,7 +2637,6 @@ default_target_args = {
 
 default_lib_args = default_target_args + {
   'name_prefix': '',
-  'install_rpath': ':'.join(lib_install_rpaths),
 }
 
 internal_lib_args = default_lib_args + {
@@ -2553,14 +2647,25 @@ internal_lib_args = default_lib_args + {
 default_mod_args = default_lib_args + {
   'name_prefix': '',
   'install_dir': dir_lib_pkg,
-  'install_rpath': ':'.join(mod_install_rpaths),
 }
 
 default_bin_args = default_target_args + {
   'install_dir': dir_bin,
-  'install_rpath': ':'.join(bin_install_rpaths),
 }
 
+if get_option('rpath')
+  default_lib_args += {
+    'install_rpath': ':'.join(lib_install_rpaths),
+  }
+
+  default_mod_args += {
+    'install_rpath': ':'.join(mod_install_rpaths),
+  }
+
+  default_bin_args += {
+    'install_rpath': ':'.join(bin_install_rpaths),
+  }
+endif
 
 
 # Helper for exporting a limited number of symbols
@@ -2573,6 +2678,20 @@ gen_export_kwargs = {
   'build_by_default': false,
   'install': false,
 }
+
+
+
+###
+### Helpers for custom targets used across the tree
+###
+
+catalog_pm = files('src/backend/catalog/Catalog.pm')
+perfect_hash_pm = files('src/tools/PerfectHash.pm')
+gen_kwlist_deps = [perfect_hash_pm]
+gen_kwlist_cmd = [
+  perl, '-I', '@SOURCE_ROOT@/src/tools',
+  files('src/tools/gen_keywordlist.pl'),
+  '--output', '@OUTDIR@', '@INPUT@']
 
 
 
@@ -2761,6 +2880,10 @@ backend_code = declare_dependency(
   dependencies: os_deps + backend_both_deps + backend_deps,
 )
 
+# install these files only during test, not main install
+test_install_data = []
+test_install_libs = []
+
 # src/backend/meson.build defines backend_mod_code used for extension
 # libraries.
 
@@ -2780,6 +2903,10 @@ subdir('src/interfaces/ecpg/test')
 subdir('doc/src/sgml')
 
 generated_sources_ac += {'': ['GNUmakefile']}
+
+# After processing src/test, add test_install_libs to the testprep_targets
+# to build them
+testprep_targets += test_install_libs
 
 
 # If there are any files in the source directory that we also generate in the
@@ -2837,6 +2964,64 @@ endif
 
 
 ###############################################################
+# Install targets
+###############################################################
+
+
+# We want to define additional install targets beyond what meson provides. For
+# that we need to define targets depending on nearly everything. We collected
+# the results of i18n.gettext() invocations into nls_targets, that also
+# includes maintainer targets though. Collect the ones we want as a dependency.
+#
+# i18n.gettext() doesn't return the dependencies before 0.60 - but the gettext
+# generation happens during install, so that's not a real issue.
+nls_mo_targets = []
+if libintl.found() and meson.version().version_compare('>=0.60')
+  # use range() to avoid the flattening of the list that foreach() would do
+  foreach off : range(0, nls_targets.length())
+    # i18n.gettext() list containing 1) list of built .mo files 2) maintainer
+    # -pot target 3) maintainer -pot target
+    nls_mo_targets += nls_targets[off][0]
+  endforeach
+  alias_target('nls', nls_mo_targets)
+endif
+
+
+all_built = [
+  backend_targets,
+  bin_targets,
+  libpq_st,
+  pl_targets,
+  contrib_targets,
+  nls_mo_targets,
+  testprep_targets,
+  ecpg_targets,
+]
+
+# Meson's default install target is quite verbose. Provide one that is quiet.
+install_quiet = custom_target('install-quiet',
+  output: 'install-quiet',
+  build_always_stale: true,
+  build_by_default: false,
+  command: [meson_bin, meson_args, 'install', '--quiet', '--no-rebuild'],
+  depends: all_built,
+)
+
+# Target to install files used for tests, which aren't installed by default
+install_test_files_args = [
+  install_files,
+  '--prefix', dir_prefix,
+  '--install', contrib_data_dir, test_install_data,
+  '--install', dir_lib_pkg, test_install_libs,
+]
+run_target('install-test-files',
+  command: [python] + install_test_files_args,
+  depends: testprep_targets,
+)
+
+
+
+###############################################################
 # Test prep
 ###############################################################
 
@@ -2850,10 +3035,10 @@ if build_system != 'windows'
   test_install_location = '@0@@1@'.format(test_install_destdir, dir_prefix)
 else
   # drives, drive-relative paths, etc make this complicated on windows, call
-  # meson's logic for it
+  # into a copy of meson's logic for it
   command = [
-    meson_bin, meson_args, 'runpython', '-c',
-    'import sys; from mesonbuild.scripts import destdir_join; print(destdir_join(sys.argv[4], sys.argv[5]))',
+    python, '-c',
+    'import sys; from pathlib import PurePath; d1=sys.argv[1]; d2=sys.argv[2]; print(str(PurePath(d1, *PurePath(d2).parts[1:])))',
     test_install_destdir, dir_prefix]
   test_install_location = run_command(command, check: true).stdout().strip()
 endif
@@ -2863,11 +3048,21 @@ meson_install_args = meson_args + ['install'] + {
     'muon': []
 }[meson_impl]
 
+# setup tests should  be run first,
+# so define priority for these
+setup_tests_priority = 100
 test('tmp_install',
     meson_bin, args: meson_install_args ,
     env: {'DESTDIR':test_install_destdir},
-    priority: 100,
+    priority: setup_tests_priority,
     timeout: 300,
+    is_parallel: false,
+    suite: ['setup'])
+
+test('install_test_files',
+    python,
+    args: install_test_files_args + ['--destdir', test_install_destdir],
+    priority: setup_tests_priority,
     is_parallel: false,
     suite: ['setup'])
 
@@ -2904,6 +3099,20 @@ endif
 # Test Generation
 ###############################################################
 
+# When using a meson version understanding exclude_suites, define a
+# 'tmp_install' test setup (the default) that excludes tests running against a
+# pre-existing install and a 'running' setup that conflicts with creation of
+# the temporary installation and tap tests (which don't support running
+# against a running server).
+
+running_suites = []
+install_suites = []
+if meson.version().version_compare('>=0.57')
+  runningcheck = true
+else
+  runningcheck = false
+endif
+
 testwrap = files('src/tools/testwrap')
 
 foreach test_dir : tests
@@ -2911,7 +3120,6 @@ foreach test_dir : tests
     testwrap,
     '--basedir', meson.build_root(),
     '--srcdir', test_dir['sd'],
-    '--testgroup', test_dir['name'],
   ]
 
   foreach kind, v : test_dir
@@ -2924,55 +3132,95 @@ foreach test_dir : tests
     if kind in ['regress', 'isolation', 'ecpg']
       if kind == 'regress'
         runner = pg_regress
+        fallback_dbname = 'regression_@0@'
       elif kind == 'isolation'
         runner = pg_isolation_regress
+        fallback_dbname = 'isolation_regression_@0@'
       elif kind == 'ecpg'
         runner = pg_regress_ecpg
+        fallback_dbname = 'ecpg_regression_@0@'
       endif
 
-      test_output = test_result_dir / test_dir['name'] / kind
+      test_group = test_dir['name']
+      test_group_running = test_dir['name'] + '-running'
 
-      test_command = [
+      test_output = test_result_dir / test_group / kind
+      test_output_running = test_result_dir / test_group_running/ kind
+
+      # Unless specified by the test, choose a non-conflicting database name,
+      # to avoid conflicts when running against existing server.
+      dbname = t.get('dbname',
+        fallback_dbname.format(test_dir['name']))
+
+      test_command_base = [
         runner.full_path(),
         '--inputdir', t.get('inputdir', test_dir['sd']),
         '--expecteddir', t.get('expecteddir', test_dir['sd']),
-        '--outputdir', test_output,
-        '--temp-instance', test_output / 'tmp_check',
         '--bindir', '',
         '--dlpath', test_dir['bd'],
         '--max-concurrent-tests=20',
-        '--port', testport.to_string(),
+        '--dbname', dbname,
       ] + t.get('regress_args', [])
 
+      test_selection = []
       if t.has_key('schedule')
-        test_command += ['--schedule', t['schedule'],]
+        test_selection += ['--schedule', t['schedule'],]
       endif
 
       if kind == 'isolation'
-        test_command += t.get('specs', [])
+        test_selection += t.get('specs', [])
       else
-        test_command += t.get('sql', [])
+        test_selection += t.get('sql', [])
       endif
 
       env = test_env
       env.prepend('PATH', temp_install_bindir, test_dir['bd'])
 
       test_kwargs = {
-        'suite': [test_dir['name']],
+        'protocol': 'tap',
         'priority': 10,
         'timeout': 1000,
         'depends': test_deps + t.get('deps', []),
         'env': env,
       } + t.get('test_kwargs', {})
 
-      test(test_dir['name'] / kind,
+      test(test_group / kind,
         python,
-        args: testwrap_base + [
+        args: [
+          testwrap_base,
+          '--testgroup', test_group,
           '--testname', kind,
-          '--', test_command,
+          '--',
+          test_command_base,
+          '--outputdir', test_output,
+          '--temp-instance', test_output / 'tmp_check',
+          '--port', testport.to_string(),
+          test_selection,
         ],
+        suite: test_group,
         kwargs: test_kwargs,
       )
+      install_suites += test_group
+
+      # some tests can't support running against running DB
+      if runningcheck and t.get('runningcheck', true)
+        test(test_group_running / kind,
+          python,
+          args: [
+            testwrap_base,
+            '--testgroup', test_group_running,
+            '--testname', kind,
+            '--',
+            test_command_base,
+            '--outputdir', test_output_running,
+            test_selection,
+          ],
+          is_parallel: t.get('runningcheck-parallel', true),
+          suite: test_group_running,
+          kwargs: test_kwargs,
+        )
+        running_suites += test_group_running
+      endif
 
       testport += 1
     elif kind == 'tap'
@@ -2995,9 +3243,10 @@ foreach test_dir : tests
         env.set(name, value)
       endforeach
 
+      test_group = test_dir['name']
       test_kwargs = {
         'protocol': 'tap',
-        'suite': [test_dir['name']],
+        'suite': test_group,
         'timeout': 1000,
         'depends': test_deps + t.get('deps', []),
         'env': env,
@@ -3017,12 +3266,14 @@ foreach test_dir : tests
           python,
           kwargs: test_kwargs,
           args: testwrap_base + [
+            '--testgroup', test_dir['name'],
             '--testname', onetap_p,
             '--', test_command,
             test_dir['sd'] / onetap,
           ],
         )
       endforeach
+      install_suites += test_group
     else
       error('unknown kind @0@ of test in @1@'.format(kind, test_dir['sd']))
     endif
@@ -3030,6 +3281,15 @@ foreach test_dir : tests
   endforeach # kinds of tests
 
 endforeach # directories with tests
+
+# repeat condition so meson realizes version dependency
+if meson.version().version_compare('>=0.57')
+  add_test_setup('tmp_install',
+    is_default: true,
+    exclude_suites: running_suites)
+  add_test_setup('running',
+    exclude_suites: ['setup'] + install_suites)
+endif
 
 
 
@@ -3042,6 +3302,7 @@ alias_target('bin', bin_targets + [libpq_st])
 alias_target('pl', pl_targets)
 alias_target('contrib', contrib_targets)
 alias_target('testprep', testprep_targets)
+alias_target('install-world', install_quiet, installdocs)
 
 
 
@@ -3053,9 +3314,11 @@ if meson.version().version_compare('>=0.57')
 
   summary(
     {
-      'data block size': cdata.get('BLCKSZ'),
-      'WAL block size': cdata.get('XLOG_BLCKSZ') / 1024,
-      'segment size': cdata.get('RELSEG_SIZE') / 131072,
+      'data block size': '@0@ kB'.format(cdata.get('BLCKSZ') / 1024),
+      'WAL block size': '@0@ kB'.format(cdata.get('XLOG_BLCKSZ') / 1024),
+      'segment size': get_option('segsize_blocks') != 0 ?
+        '@0@ blocks'.format(cdata.get('RELSEG_SIZE')) :
+        '@0@ GB'.format(get_option('segsize')),
     },
     section: 'Data layout',
   )
@@ -3119,6 +3382,8 @@ if meson.version().version_compare('>=0.57')
     {
       'bonjour': bonjour,
       'bsd_auth': bsd_auth,
+      'docs': docs_dep,
+      'docs_pdf': docs_pdf_dep,
       'gss': gssapi,
       'icu': icu,
       'ldap': ldap,
@@ -3127,13 +3392,13 @@ if meson.version().version_compare('>=0.57')
       'llvm': llvm,
       'lz4': lz4,
       'nls': libintl,
+      'openssl': ssl,
       'pam': pam,
       'plperl': perl_dep,
       'plpython': python3_dep,
       'pltcl': tcl_dep,
       'readline': readline,
       'selinux': selinux,
-      'ssl': ssl,
       'systemd': systemd,
       'uuid': uuid,
       'zlib': zlib,

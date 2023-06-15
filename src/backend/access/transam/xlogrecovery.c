@@ -8,13 +8,13 @@
  * or standby mode, depending on configuration options and the state of
  * the control file and possible backup label file.  PerformWalRecovery()
  * performs the actual WAL replay, calling the rmgr-specific redo routines.
- * EndWalRecovery() performs end-of-recovery checks and cleanup actions,
+ * FinishWalRecovery() performs end-of-recovery checks and cleanup actions,
  * and prepares information needed to initialize the WAL for writes.  In
  * addition to these three main functions, there are a bunch of functions
  * for interrogating recovery state and controlling the recovery process.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/xlogrecovery.c
@@ -95,7 +95,6 @@ int			recovery_min_apply_delay = 0;
 /* options formerly taken from recovery.conf for XLOG streaming */
 char	   *PrimaryConnInfo = NULL;
 char	   *PrimarySlotName = NULL;
-char	   *PromoteTriggerFile = NULL;
 bool		wal_receiver_create_temp_slot = false;
 
 /*
@@ -318,8 +317,8 @@ typedef struct XLogRecoveryCtlData
 
 	/*
 	 * recoveryWakeupLatch is used to wake up the startup process to continue
-	 * WAL replay, if it is waiting for WAL to arrive or failover trigger file
-	 * to appear.
+	 * WAL replay, if it is waiting for WAL to arrive or promotion to be
+	 * requested.
 	 *
 	 * Note that the startup process also uses another latch, its procLatch,
 	 * to wait for recovery conflict. If we get rid of recoveryWakeupLatch for
@@ -386,6 +385,7 @@ static bool recoveryStopAfter;
 /* prototypes for local functions */
 static void ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *replayTLI);
 
+static void EnableStandbyMode(void);
 static void readRecoverySignalFile(void);
 static void validateRecoveryParameters(void);
 static bool read_backup_label(XLogRecPtr *checkPointLoc,
@@ -471,6 +471,24 @@ XLogRecoveryShmemInit(void)
 }
 
 /*
+ * A thin wrapper to enable StandbyMode and do other preparatory work as
+ * needed.
+ */
+static void
+EnableStandbyMode(void)
+{
+	StandbyMode = true;
+
+	/*
+	 * To avoid server log bloat, we don't report recovery progress in a
+	 * standby as it will always be in recovery unless promoted. We disable
+	 * startup progress timeout in standby mode to avoid calling
+	 * startup_progress_timeout_handler() unnecessarily.
+	 */
+	disable_startup_progress_timeout();
+}
+
+/*
  * Prepare the system for WAL recovery, if needed.
  *
  * This is called by StartupXLOG() which coordinates the server startup
@@ -487,7 +505,7 @@ XLogRecoveryShmemInit(void)
  * disk does after initializing other subsystems, but before calling
  * PerformWalRecovery().
  *
- * This initializes some global variables like ArchiveModeRequested, and
+ * This initializes some global variables like ArchiveRecoveryRequested, and
  * StandbyModeRequested and InRecovery.
  */
 void
@@ -603,7 +621,7 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 		 */
 		InArchiveRecovery = true;
 		if (StandbyModeRequested)
-			StandbyMode = true;
+			EnableStandbyMode();
 
 		/*
 		 * When a backup_label file is present, we want to roll forward from
@@ -740,7 +758,7 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 		{
 			InArchiveRecovery = true;
 			if (StandbyModeRequested)
-				StandbyMode = true;
+				EnableStandbyMode();
 		}
 
 		/* Get the last valid checkpoint record. */
@@ -1378,11 +1396,11 @@ read_tablespace_map(List **tablespaces)
  *
  * This does not close the 'xlogreader' yet, because in some cases the caller
  * still wants to re-read the last checkpoint record by calling
- * ReadCheckPointRecord().
+ * ReadCheckpointRecord().
  *
  * Returns the position of the last valid or applied record, after which new
  * WAL should be appended, information about why recovery was ended, and some
- * other things. See the WalRecoveryResult struct for details.
+ * other things. See the EndOfWalRecoveryInfo struct for details.
  */
 EndOfWalRecoveryInfo *
 FinishWalRecovery(void)
@@ -1917,6 +1935,31 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 	XLogRecoveryCtl->lastReplayedTLI = *replayTLI;
 	SpinLockRelease(&XLogRecoveryCtl->info_lck);
 
+	/* ------
+	 * Wakeup walsenders:
+	 *
+	 * On the standby, the WAL is flushed first (which will only wake up
+	 * physical walsenders) and then applied, which will only wake up logical
+	 * walsenders.
+	 *
+	 * Indeed, logical walsenders on standby can't decode and send data until
+	 * it's been applied.
+	 *
+	 * Physical walsenders don't need to be woken up during replay unless
+	 * cascading replication is allowed and time line change occurred (so that
+	 * they can notice that they are on a new time line).
+	 *
+	 * That's why the wake up conditions are for:
+	 *
+	 *  - physical walsenders in case of new time line and cascade
+	 *    replication is allowed
+	 *  - logical walsenders in case cascade replication is allowed (could not
+	 *    be created otherwise)
+	 * ------
+	 */
+	if (AllowCascadeReplication())
+		WalSndWakeup(switchedTLI, true);
+
 	/*
 	 * If rm_redo called XLogRequestWalReceiverReply, then we wake up the
 	 * receiver so that it notices the updated lastReplayedEndRecPtr and sends
@@ -1939,12 +1982,6 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 		 * bogus) future WAL segments on the old timeline.
 		 */
 		RemoveNonParentXlogFiles(xlogreader->EndRecPtr, *replayTLI);
-
-		/*
-		 * Wake up any walsenders to notice that we are on a new timeline.
-		 */
-		if (AllowCascadeReplication())
-			WalSndWakeup();
 
 		/* Reset the prefetcher. */
 		XLogPrefetchReconfigure();
@@ -2115,7 +2152,7 @@ CheckRecoveryConsistency(void)
 
 		/*
 		 * Check that pg_tblspc doesn't contain any real directories. Replay
-		 * of Database/CREATE_* records may have created ficticious tablespace
+		 * of Database/CREATE_* records may have created fictitious tablespace
 		 * directories that should have been removed by the time consistency
 		 * was reached.
 		 */
@@ -2549,8 +2586,13 @@ recoveryStopsBefore(XLogReaderState *record)
 		stopsHere = (recordXid == recoveryTargetXid);
 	}
 
-	if (recoveryTarget == RECOVERY_TARGET_TIME &&
-		getRecordTimestamp(record, &recordXtime))
+	/*
+	 * Note: we must fetch recordXtime regardless of recoveryTarget setting.
+	 * We don't expect getRecordTimestamp ever to fail, since we already know
+	 * this is a commit or abort record; but test its result anyway.
+	 */
+	if (getRecordTimestamp(record, &recordXtime) &&
+		recoveryTarget == RECOVERY_TARGET_TIME)
 	{
 		/*
 		 * There can be many transactions that share the same commit time, so
@@ -2602,7 +2644,7 @@ recoveryStopsAfter(XLogReaderState *record)
 	uint8		info;
 	uint8		xact_info;
 	uint8		rmid;
-	TimestampTz recordXtime;
+	TimestampTz recordXtime = 0;
 
 	/*
 	 * Ignore recovery target settings when not in archive recovery (meaning
@@ -2906,10 +2948,7 @@ recoveryApplyDelay(XLogReaderState *record)
 	{
 		ResetLatch(&XLogRecoveryCtl->recoveryWakeupLatch);
 
-		/*
-		 * This might change recovery_min_apply_delay or the trigger file's
-		 * location.
-		 */
+		/* This might change recovery_min_apply_delay. */
 		HandleStartupProcInterrupts();
 
 		if (CheckForStandbyTrigger())
@@ -3030,9 +3069,9 @@ ReadRecord(XLogPrefetcher *xlogprefetcher, int emode,
 		{
 			/*
 			 * When we find that WAL ends in an incomplete record, keep track
-			 * of that record.  After recovery is done, we'll write a record to
-			 * indicate to downstream WAL readers that that portion is to be
-			 * ignored.
+			 * of that record.  After recovery is done, we'll write a record
+			 * to indicate to downstream WAL readers that that portion is to
+			 * be ignored.
 			 *
 			 * However, when ArchiveRecoveryRequested = true, we're going to
 			 * switch to a new timeline at the end of recovery. We will only
@@ -3079,9 +3118,10 @@ ReadRecord(XLogPrefetcher *xlogprefetcher, int emode,
 			XLogFileName(fname, xlogreader->seg.ws_tli, segno,
 						 wal_segment_size);
 			ereport(emode_for_corrupt_record(emode, xlogreader->EndRecPtr),
-					(errmsg("unexpected timeline ID %u in WAL segment %s, offset %u",
+					(errmsg("unexpected timeline ID %u in WAL segment %s, LSN %X/%X, offset %u",
 							xlogreader->latestPageTLI,
 							fname,
+							LSN_FORMAT_ARGS(xlogreader->latestPagePtr),
 							offset)));
 			record = NULL;
 		}
@@ -3115,7 +3155,7 @@ ReadRecord(XLogPrefetcher *xlogprefetcher, int emode,
 						(errmsg_internal("reached end of WAL in pg_wal, entering archive recovery")));
 				InArchiveRecovery = true;
 				if (StandbyModeRequested)
-					StandbyMode = true;
+					EnableStandbyMode();
 
 				SwitchIntoArchiveRecovery(xlogreader->EndRecPtr, replayTLI);
 				minRecoveryPoint = xlogreader->EndRecPtr;
@@ -3143,10 +3183,12 @@ ReadRecord(XLogPrefetcher *xlogprefetcher, int emode,
 }
 
 /*
- * Read the XLOG page containing RecPtr into readBuf (if not read already).
- * Returns number of bytes read, if the page is read successfully, or
- * XLREAD_FAIL in case of errors.  When errors occur, they are ereport'ed, but
- * only if they have not been previously reported.
+ * Read the XLOG page containing targetPagePtr into readBuf (if not read
+ * already).  Returns number of bytes read, if the page is read successfully,
+ * or XLREAD_FAIL in case of errors.  When errors occur, they are ereport'ed,
+ * but only if they have not been previously reported.
+ *
+ * See XLogReaderRoutine.page_read for more details.
  *
  * While prefetching, xlogreader->nonblocking may be set.  In that case,
  * returns XLREAD_WOULDBLOCK if we'd otherwise have to wait for more WAL.
@@ -3154,11 +3196,11 @@ ReadRecord(XLogPrefetcher *xlogprefetcher, int emode,
  * This is responsible for restoring files from archive as needed, as well
  * as for waiting for the requested WAL record to arrive in standby mode.
  *
- * 'emode' specifies the log level used for reporting "file not found" or
- * "end of WAL" situations in archive recovery, or in standby mode when a
- * trigger file is found. If set to WARNING or below, XLogPageRead() returns
- * XLREAD_FAIL in those situations, on higher log levels the ereport() won't
- * return.
+ * xlogreader->private_data->emode specifies the log level used for reporting
+ * "file not found" or "end of WAL" situations in archive recovery, or in
+ * standby mode when promotion is triggered. If set to WARNING or below,
+ * XLogPageRead() returns XLREAD_FAIL in those situations, on higher log
+ * levels the ereport() won't return.
  *
  * In standby mode, if after a successful return of XLogPageRead() the
  * caller finds the record it's interested in to be broken, it should
@@ -3173,7 +3215,7 @@ XLogPageRead(XLogReaderState *xlogreader, XLogRecPtr targetPagePtr, int reqLen,
 			 XLogRecPtr targetRecPtr, char *readBuf)
 {
 	XLogPageReadPrivate *private =
-	(XLogPageReadPrivate *) xlogreader->private_data;
+		(XLogPageReadPrivate *) xlogreader->private_data;
 	int			emode = private->emode;
 	uint32		targetPageOff;
 	XLogSegNo	targetSegNo PG_USED_FOR_ASSERTS_ONLY;
@@ -3284,14 +3326,16 @@ retry:
 			errno = save_errno;
 			ereport(emode_for_corrupt_record(emode, targetPagePtr + reqLen),
 					(errcode_for_file_access(),
-					 errmsg("could not read from WAL segment %s, offset %u: %m",
-							fname, readOff)));
+					 errmsg("could not read from WAL segment %s, LSN %X/%X, offset %u: %m",
+							fname, LSN_FORMAT_ARGS(targetPagePtr),
+							readOff)));
 		}
 		else
 			ereport(emode_for_corrupt_record(emode, targetPagePtr + reqLen),
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("could not read from WAL segment %s, offset %u: read %d of %zu",
-							fname, readOff, r, (Size) XLOG_BLCKSZ)));
+					 errmsg("could not read from WAL segment %s, LSN %X/%X, offset %u: read %d of %zu",
+							fname, LSN_FORMAT_ARGS(targetPagePtr),
+							readOff, r, (Size) XLOG_BLCKSZ)));
 		goto next_record_is_invalid;
 	}
 	pgstat_report_wait_end();
@@ -3424,7 +3468,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 	 *
 	 * 1. Read from either archive or pg_wal (XLOG_FROM_ARCHIVE), or just
 	 *	  pg_wal (XLOG_FROM_PG_WAL)
-	 * 2. Check trigger file
+	 * 2. Check for promotion trigger request
 	 * 3. Read from primary server via walreceiver (XLOG_FROM_STREAM)
 	 * 4. Rescan timelines
 	 * 5. Sleep wal_retrieve_retry_interval milliseconds, and loop back to 1.
@@ -3481,10 +3525,10 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 				case XLOG_FROM_PG_WAL:
 
 					/*
-					 * Check to see if the trigger file exists. Note that we
-					 * do this only after failure, so when you create the
-					 * trigger file, we still finish replaying as much as we
-					 * can from archive and pg_wal before failover.
+					 * Check to see if promotion is requested. Note that we do
+					 * this only after failure, so when you promote, we still
+					 * finish replaying as much as we can from archive and
+					 * pg_wal before failover.
 					 */
 					if (StandbyMode && CheckForStandbyTrigger())
 					{
@@ -3569,6 +3613,9 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 
 						elog(LOG, "waiting for WAL to become available at %X/%X",
 							 LSN_FORMAT_ARGS(RecPtr));
+
+						/* Do background tasks that might benefit us later. */
+						KnownAssignedTransactionIdsIdleMaintenance();
 
 						(void) WaitLatch(&XLogRecoveryCtl->recoveryWakeupLatch,
 										 WL_LATCH_SET | WL_TIMEOUT |
@@ -3836,18 +3883,20 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 						streaming_reply_sent = true;
 					}
 
+					/* Do any background tasks that might benefit us later. */
+					KnownAssignedTransactionIdsIdleMaintenance();
+
 					/* Update pg_stat_recovery_prefetch before sleeping. */
 					XLogPrefetcherComputeStats(xlogprefetcher);
 
 					/*
-					 * Wait for more WAL to arrive. Time out after 5 seconds
-					 * to react to a trigger file promptly and to check if the
-					 * WAL receiver is still active.
+					 * Wait for more WAL to arrive, when we will be woken
+					 * immediately by the WAL receiver.
 					 */
 					(void) WaitLatch(&XLogRecoveryCtl->recoveryWakeupLatch,
-									 WL_LATCH_SET | WL_TIMEOUT |
-									 WL_EXIT_ON_PM_DEATH,
-									 5000L, WAIT_EVENT_RECOVERY_WAL_STREAM);
+									 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
+									 -1L,
+									 WAIT_EVENT_RECOVERY_WAL_STREAM);
 					ResetLatch(&XLogRecoveryCtl->recoveryWakeupLatch);
 					break;
 				}
@@ -4294,14 +4343,11 @@ SetPromoteIsTriggered(void)
 }
 
 /*
- * Check to see whether the user-specified trigger file exists and whether a
- * promote request has arrived.  If either condition holds, return true.
+ * Check whether a promote request has arrived.
  */
 static bool
 CheckForStandbyTrigger(void)
 {
-	struct stat stat_buf;
-
 	if (LocalPromoteIsTriggered)
 		return true;
 
@@ -4313,23 +4359,6 @@ CheckForStandbyTrigger(void)
 		SetPromoteIsTriggered();
 		return true;
 	}
-
-	if (PromoteTriggerFile == NULL || strcmp(PromoteTriggerFile, "") == 0)
-		return false;
-
-	if (stat(PromoteTriggerFile, &stat_buf) == 0)
-	{
-		ereport(LOG,
-				(errmsg("promote trigger file found: %s", PromoteTriggerFile)));
-		unlink(PromoteTriggerFile);
-		SetPromoteIsTriggered();
-		return true;
-	}
-	else if (errno != ENOENT)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not stat promote trigger file \"%s\": %m",
-						PromoteTriggerFile)));
 
 	return false;
 }
@@ -4806,12 +4835,14 @@ check_recovery_target_time(char **newval, void **extra, GucSource source)
 			char	   *field[MAXDATEFIELDS];
 			int			ftype[MAXDATEFIELDS];
 			char		workbuf[MAXDATELEN + MAXDATEFIELDS];
+			DateTimeErrorExtra dtextra;
 			TimestampTz timestamp;
 
 			dterr = ParseDateTime(str, workbuf, sizeof(workbuf),
 								  field, ftype, MAXDATEFIELDS, &nf);
 			if (dterr == 0)
-				dterr = DecodeDateTime(field, ftype, nf, &dtype, tm, &fsec, &tz);
+				dterr = DecodeDateTime(field, ftype, nf,
+									   &dtype, tm, &fsec, &tz, &dtextra);
 			if (dterr != 0)
 				return false;
 			if (dtype != DTK_DATE)

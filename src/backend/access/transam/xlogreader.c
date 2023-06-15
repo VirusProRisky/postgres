@@ -3,7 +3,7 @@
  * xlogreader.c
  *		Generic XLog reading facility
  *
- * Portions Copyright (c) 2013-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2013-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		src/backend/access/transam/xlogreader.c
@@ -282,7 +282,7 @@ XLogRecPtr
 XLogReleasePreviousRecord(XLogReaderState *state)
 {
 	DecodedXLogRecord *record;
-	XLogRecPtr		next_lsn;
+	XLogRecPtr	next_lsn;
 
 	if (!state->record)
 		return InvalidXLogRecPtr;
@@ -623,8 +623,9 @@ restart:
 	}
 	else if (targetRecOff < pageHeaderSize)
 	{
-		report_invalid_record(state, "invalid record offset at %X/%X",
-							  LSN_FORMAT_ARGS(RecPtr));
+		report_invalid_record(state, "invalid record offset at %X/%X: expected at least %u, got %u",
+							  LSN_FORMAT_ARGS(RecPtr),
+							  pageHeaderSize, targetRecOff);
 		goto err;
 	}
 
@@ -672,7 +673,7 @@ restart:
 		if (total_len < SizeOfXLogRecord)
 		{
 			report_invalid_record(state,
-								  "invalid record length at %X/%X: wanted %u, got %u",
+								  "invalid record length at %X/%X: expected at least %u, got %u",
 								  LSN_FORMAT_ARGS(RecPtr),
 								  (uint32) SizeOfXLogRecord, total_len);
 			goto err;
@@ -1119,7 +1120,7 @@ ValidXLogRecordHeader(XLogReaderState *state, XLogRecPtr RecPtr,
 	if (record->xl_tot_len < SizeOfXLogRecord)
 	{
 		report_invalid_record(state,
-							  "invalid record length at %X/%X: wanted %u, got %u",
+							  "invalid record length at %X/%X: expected at least %u, got %u",
 							  LSN_FORMAT_ARGS(RecPtr),
 							  (uint32) SizeOfXLogRecord, record->xl_tot_len);
 		return false;
@@ -1226,9 +1227,10 @@ XLogReaderValidatePageHeader(XLogReaderState *state, XLogRecPtr recptr,
 		XLogFileName(fname, state->seg.ws_tli, segno, state->segcxt.ws_segsize);
 
 		report_invalid_record(state,
-							  "invalid magic number %04X in WAL segment %s, offset %u",
+							  "invalid magic number %04X in WAL segment %s, LSN %X/%X, offset %u",
 							  hdr->xlp_magic,
 							  fname,
+							  LSN_FORMAT_ARGS(recptr),
 							  offset);
 		return false;
 	}
@@ -1240,9 +1242,10 @@ XLogReaderValidatePageHeader(XLogReaderState *state, XLogRecPtr recptr,
 		XLogFileName(fname, state->seg.ws_tli, segno, state->segcxt.ws_segsize);
 
 		report_invalid_record(state,
-							  "invalid info bits %04X in WAL segment %s, offset %u",
+							  "invalid info bits %04X in WAL segment %s, LSN %X/%X, offset %u",
 							  hdr->xlp_info,
 							  fname,
+							  LSN_FORMAT_ARGS(recptr),
 							  offset);
 		return false;
 	}
@@ -1281,9 +1284,10 @@ XLogReaderValidatePageHeader(XLogReaderState *state, XLogRecPtr recptr,
 
 		/* hmm, first page of file doesn't have a long header? */
 		report_invalid_record(state,
-							  "invalid info bits %04X in WAL segment %s, offset %u",
+							  "invalid info bits %04X in WAL segment %s, LSN %X/%X, offset %u",
 							  hdr->xlp_info,
 							  fname,
+							  LSN_FORMAT_ARGS(recptr),
 							  offset);
 		return false;
 	}
@@ -1300,9 +1304,10 @@ XLogReaderValidatePageHeader(XLogReaderState *state, XLogRecPtr recptr,
 		XLogFileName(fname, state->seg.ws_tli, segno, state->segcxt.ws_segsize);
 
 		report_invalid_record(state,
-							  "unexpected pageaddr %X/%X in WAL segment %s, offset %u",
+							  "unexpected pageaddr %X/%X in WAL segment %s, LSN %X/%X, offset %u",
 							  LSN_FORMAT_ARGS(hdr->xlp_pageaddr),
 							  fname,
+							  LSN_FORMAT_ARGS(recptr),
 							  offset);
 		return false;
 	}
@@ -1325,10 +1330,11 @@ XLogReaderValidatePageHeader(XLogReaderState *state, XLogRecPtr recptr,
 			XLogFileName(fname, state->seg.ws_tli, segno, state->segcxt.ws_segsize);
 
 			report_invalid_record(state,
-								  "out-of-sequence timeline ID %u (after %u) in WAL segment %s, offset %u",
+								  "out-of-sequence timeline ID %u (after %u) in WAL segment %s, LSN %X/%X, offset %u",
 								  hdr->xlp_tli,
 								  state->latestPageTLI,
 								  fname,
+								  LSN_FORMAT_ARGS(recptr),
 								  offset);
 			return false;
 		}
@@ -1470,7 +1476,7 @@ err:
 }
 
 /*
- * Helper function to ease writing of XLogRoutine->page_read callbacks.
+ * Helper function to ease writing of XLogReaderRoutine->page_read callbacks.
  * If this function is used, caller must supply a segment_open callback in
  * 'state', as that is used here.
  *
@@ -1507,7 +1513,7 @@ WALRead(XLogReaderState *state,
 		/*
 		 * If the data we want is not in a segment we have open, close what we
 		 * have (if anything) and open the next one, using the caller's
-		 * provided openSegment callback.
+		 * provided segment_open callback.
 		 */
 		if (state->seg.ws_file < 0 ||
 			!XLByteInSeg(recptr, state->seg.ws_segno, state->segcxt.ws_segsize) ||

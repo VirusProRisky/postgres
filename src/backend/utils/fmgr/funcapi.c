@@ -4,7 +4,7 @@
  *	  Utility and convenience functions for fmgr functions that return
  *	  sets and/or composite types, or deal with VARIADIC inputs.
  *
- * Copyright (c) 2002-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/fmgr/funcapi.c
@@ -1602,7 +1602,6 @@ get_func_result_name(Oid functionId)
 	HeapTuple	procTuple;
 	Datum		proargmodes;
 	Datum		proargnames;
-	bool		isnull;
 	ArrayType  *arr;
 	int			numargs;
 	char	   *argmodes;
@@ -1623,14 +1622,10 @@ get_func_result_name(Oid functionId)
 	else
 	{
 		/* Get the data out of the tuple */
-		proargmodes = SysCacheGetAttr(PROCOID, procTuple,
-									  Anum_pg_proc_proargmodes,
-									  &isnull);
-		Assert(!isnull);
-		proargnames = SysCacheGetAttr(PROCOID, procTuple,
-									  Anum_pg_proc_proargnames,
-									  &isnull);
-		Assert(!isnull);
+		proargmodes = SysCacheGetAttrNotNull(PROCOID, procTuple,
+											 Anum_pg_proc_proargmodes);
+		proargnames = SysCacheGetAttrNotNull(PROCOID, procTuple,
+											 Anum_pg_proc_proargnames);
 
 		/*
 		 * We expect the arrays to be 1-D arrays of the right types; verify
@@ -1717,14 +1712,10 @@ build_function_result_tupdesc_t(HeapTuple procTuple)
 		return NULL;
 
 	/* Get the data out of the tuple */
-	proallargtypes = SysCacheGetAttr(PROCOID, procTuple,
-									 Anum_pg_proc_proallargtypes,
-									 &isnull);
-	Assert(!isnull);
-	proargmodes = SysCacheGetAttr(PROCOID, procTuple,
-								  Anum_pg_proc_proargmodes,
-								  &isnull);
-	Assert(!isnull);
+	proallargtypes = SysCacheGetAttrNotNull(PROCOID, procTuple,
+											Anum_pg_proc_proallargtypes);
+	proargmodes = SysCacheGetAttrNotNull(PROCOID, procTuple,
+										 Anum_pg_proc_proargmodes);
 	proargnames = SysCacheGetAttr(PROCOID, procTuple,
 								  Anum_pg_proc_proargnames,
 								  &isnull);
@@ -1876,7 +1867,7 @@ RelationNameGetTupleDesc(const char *relname)
 	List	   *relname_list;
 
 	/* Open relation and copy the tuple description */
-	relname_list = stringToQualifiedNameList(relname);
+	relname_list = stringToQualifiedNameList(relname, NULL);
 	relvar = makeRangeVarFromNameList(relname_list);
 	rel = relation_openrv(relvar, AccessShareLock);
 	tupdesc = CreateTupleDescCopy(RelationGetDescr(rel));

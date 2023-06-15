@@ -1,10 +1,12 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 tests += {
   'name': 'ssl',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
   'tap': {
     'env': {
-      'with_ssl': get_option('ssl'),
+      'with_ssl': ssl_library,
       'OPENSSL': openssl.path(),
     },
     'tests': [

@@ -3,7 +3,7 @@
  * globals.c
  *	  global variable declarations
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -139,7 +139,10 @@ int			max_worker_processes = 8;
 int			max_parallel_workers = 8;
 int			MaxBackends = 0;
 
-int			VacuumCostPageHit = 1;	/* GUC parameters for vacuum */
+/* GUC parameters for vacuum */
+int			VacuumBufferUsageLimit = 256;
+
+int			VacuumCostPageHit = 1;
 int			VacuumCostPageMiss = 2;
 int			VacuumCostPageDirty = 20;
 int			VacuumCostLimit = 200;

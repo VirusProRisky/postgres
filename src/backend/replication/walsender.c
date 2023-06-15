@@ -37,7 +37,7 @@
  * record, wait for it to be replicated to the standby, and then exit.
  *
  *
- * Portions Copyright (c) 2010-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/walsender.c
@@ -906,22 +906,33 @@ logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int req
 	int			count;
 	WALReadError errinfo;
 	XLogSegNo	segno;
-	TimeLineID	currTLI = GetWALInsertionTimeLine();
+	TimeLineID	currTLI;
 
 	/*
-	 * Since logical decoding is only permitted on a primary server, we know
-	 * that the current timeline ID can't be changing any more. If we did this
-	 * on a standby, we'd have to worry about the values we compute here
-	 * becoming invalid due to a promotion or timeline change.
+	 * Make sure we have enough WAL available before retrieving the current
+	 * timeline. This is needed to determine am_cascading_walsender accurately
+	 * which is needed to determine the current timeline.
 	 */
+	flushptr = WalSndWaitForWal(targetPagePtr + reqLen);
+
+	/*
+	 * Since logical decoding is also permitted on a standby server, we need
+	 * to check if the server is in recovery to decide how to get the current
+	 * timeline ID (so that it also cover the promotion or timeline change
+	 * cases).
+	 */
+	am_cascading_walsender = RecoveryInProgress();
+
+	if (am_cascading_walsender)
+		GetXLogReplayRecPtr(&currTLI);
+	else
+		currTLI = GetWALInsertionTimeLine();
+
 	XLogReadDetermineTimeline(state, targetPagePtr, reqLen, currTLI);
 	sendTimeLineIsHistoric = (state->currTLI != currTLI);
 	sendTimeLine = state->currTLI;
 	sendTimeLineValidUpto = state->currTLIValidUntil;
 	sendTimeLineNextTLI = state->nextTLI;
-
-	/* make sure we have enough WAL available */
-	flushptr = WalSndWaitForWal(targetPagePtr + reqLen);
 
 	/* fail if not (implies we are going to shut down) */
 	if (flushptr < targetPagePtr + reqLen)
@@ -937,9 +948,9 @@ logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int req
 				 cur_page,
 				 targetPagePtr,
 				 XLOG_BLCKSZ,
-				 state->seg.ws_tli, /* Pass the current TLI because only
-									 * WalSndSegmentOpen controls whether new
-									 * TLI is needed. */
+				 currTLI,		/* Pass the current TLI because only
+								 * WalSndSegmentOpen controls whether new TLI
+								 * is needed. */
 				 &errinfo))
 		WALReadRaiseError(&errinfo);
 
@@ -1099,6 +1110,11 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 				/*- translator: %s is a CREATE_REPLICATION_SLOT statement */
 						(errmsg("%s must be called in REPEATABLE READ isolation mode transaction",
 								"CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use')")));
+			if (!XactReadOnly)
+				ereport(ERROR,
+				/*- translator: %s is a CREATE_REPLICATION_SLOT statement */
+						(errmsg("%s must be called in a read only transaction",
+								"CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use')")));
 
 			if (FirstSnapshotSet)
 				ereport(ERROR,
@@ -1247,13 +1263,6 @@ StartLogicalReplication(StartReplicationCmd *cmd)
 	Assert(!MyReplicationSlot);
 
 	ReplicationSlotAcquire(cmd->slotname, true);
-
-	if (XLogRecPtrIsInvalid(MyReplicationSlot->data.restart_lsn))
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("cannot read from logical replication slot \"%s\"",
-						cmd->slotname),
-				 errdetail("This slot has been invalidated because it exceeded the maximum reserved size.")));
 
 	/*
 	 * Force a disconnect, so that the decoding code doesn't need to care
@@ -2045,9 +2054,9 @@ PhysicalConfirmReceivedLocation(XLogRecPtr lsn)
 
 	/*
 	 * One could argue that the slot should be saved to disk now, but that'd
-	 * be energy wasted - the worst lost information can do here is give us
-	 * wrong information in a statistics view - we'll just potentially be more
-	 * conservative in removing files.
+	 * be energy wasted - the worst thing lost information could cause here is
+	 * to give wrong information in a statistics view - we'll just potentially
+	 * be more conservative in removing files.
 	 */
 }
 
@@ -2605,6 +2614,23 @@ InitWalSenderSlot(void)
 			walsnd->sync_standby_priority = 0;
 			walsnd->latch = &MyProc->procLatch;
 			walsnd->replyTime = 0;
+
+			/*
+			 * The kind assignment is done here and not in StartReplication()
+			 * and StartLogicalReplication(). Indeed, the logical walsender
+			 * needs to read WAL records (like snapshot of running
+			 * transactions) during the slot creation. So it needs to be woken
+			 * up based on its kind.
+			 *
+			 * The kind assignment could also be done in StartReplication(),
+			 * StartLogicalReplication() and CREATE_REPLICATION_SLOT but it
+			 * seems better to set it on one place.
+			 */
+			if (MyDatabaseId == InvalidOid)
+				walsnd->kind = REPLICATION_KIND_PHYSICAL;
+			else
+				walsnd->kind = REPLICATION_KIND_LOGICAL;
+
 			SpinLockRelease(&walsnd->mutex);
 			/* don't need the lock anymore */
 			MyWalSnd = (WalSnd *) walsnd;
@@ -3061,10 +3087,14 @@ XLogSendLogical(void)
 	 * If first time through in this session, initialize flushPtr.  Otherwise,
 	 * we only need to update flushPtr if EndRecPtr is past it.
 	 */
-	if (flushPtr == InvalidXLogRecPtr)
-		flushPtr = GetFlushRecPtr(NULL);
-	else if (logical_decoding_ctx->reader->EndRecPtr >= flushPtr)
-		flushPtr = GetFlushRecPtr(NULL);
+	if (flushPtr == InvalidXLogRecPtr ||
+		logical_decoding_ctx->reader->EndRecPtr >= flushPtr)
+	{
+		if (am_cascading_walsender)
+			flushPtr = GetStandbyFlushRecPtr(NULL);
+		else
+			flushPtr = GetFlushRecPtr(NULL);
+	}
 
 	/* If EndRecPtr is still past our flushPtr, it means we caught up. */
 	if (logical_decoding_ctx->reader->EndRecPtr >= flushPtr)
@@ -3155,7 +3185,8 @@ GetStandbyFlushRecPtr(TimeLineID *tli)
 	receivePtr = GetWalRcvFlushRecPtr(NULL, &receiveTLI);
 	replayPtr = GetXLogReplayRecPtr(&replayTLI);
 
-	*tli = replayTLI;
+	if (tli)
+		*tli = replayTLI;
 
 	result = replayPtr;
 	if (receiveTLI == replayTLI && receivePtr > replayPtr)
@@ -3270,7 +3301,7 @@ WalSndShmemInit(void)
 		MemSet(WalSndCtl, 0, WalSndShmemSize());
 
 		for (i = 0; i < NUM_SYNC_REP_WAIT_MODE; i++)
-			SHMQueueInit(&(WalSndCtl->SyncRepQueue[i]));
+			dlist_init(&(WalSndCtl->SyncRepQueue[i]));
 
 		for (i = 0; i < max_wal_senders; i++)
 		{
@@ -3278,36 +3309,41 @@ WalSndShmemInit(void)
 
 			SpinLockInit(&walsnd->mutex);
 		}
+
+		ConditionVariableInit(&WalSndCtl->wal_flush_cv);
+		ConditionVariableInit(&WalSndCtl->wal_replay_cv);
 	}
 }
 
 /*
- * Wake up all walsenders
+ * Wake up physical, logical or both kinds of walsenders
+ *
+ * The distinction between physical and logical walsenders is done, because:
+ * - physical walsenders can't send data until it's been flushed
+ * - logical walsenders on standby can't decode and send data until it's been
+ *   applied
+ *
+ * For cascading replication we need to wake up physical walsenders separately
+ * from logical walsenders (see the comment before calling WalSndWakeup() in
+ * ApplyWalRecord() for more details).
  *
  * This will be called inside critical sections, so throwing an error is not
  * advisable.
  */
 void
-WalSndWakeup(void)
+WalSndWakeup(bool physical, bool logical)
 {
-	int			i;
+	/*
+	 * Wake up all the walsenders waiting on WAL being flushed or replayed
+	 * respectively.  Note that waiting walsender would have prepared to sleep
+	 * on the CV (i.e., added itself to the CV's waitlist) in WalSndWait()
+	 * before actually waiting.
+	 */
+	if (physical)
+		ConditionVariableBroadcast(&WalSndCtl->wal_flush_cv);
 
-	for (i = 0; i < max_wal_senders; i++)
-	{
-		Latch	   *latch;
-		WalSnd	   *walsnd = &WalSndCtl->walsnds[i];
-
-		/*
-		 * Get latch pointer with spinlock held, for the unlikely case that
-		 * pointer reads aren't atomic (as they're 8 bytes).
-		 */
-		SpinLockAcquire(&walsnd->mutex);
-		latch = walsnd->latch;
-		SpinLockRelease(&walsnd->mutex);
-
-		if (latch != NULL)
-			SetLatch(latch);
-	}
+	if (logical)
+		ConditionVariableBroadcast(&WalSndCtl->wal_replay_cv);
 }
 
 /*
@@ -3321,9 +3357,44 @@ WalSndWait(uint32 socket_events, long timeout, uint32 wait_event)
 	WaitEvent	event;
 
 	ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetSocketPos, socket_events, NULL);
+
+	/*
+	 * We use a condition variable to efficiently wake up walsenders in
+	 * WalSndWakeup().
+	 *
+	 * Every walsender prepares to sleep on a shared memory CV. Note that it
+	 * just prepares to sleep on the CV (i.e., adds itself to the CV's
+	 * waitlist), but does not actually wait on the CV (IOW, it never calls
+	 * ConditionVariableSleep()). It still uses WaitEventSetWait() for
+	 * waiting, because we also need to wait for socket events. The processes
+	 * (startup process, walreceiver etc.) wanting to wake up walsenders use
+	 * ConditionVariableBroadcast(), which in turn calls SetLatch(), helping
+	 * walsenders come out of WaitEventSetWait().
+	 *
+	 * This approach is simple and efficient because, one doesn't have to loop
+	 * through all the walsenders slots, with a spinlock acquisition and
+	 * release for every iteration, just to wake up only the waiting
+	 * walsenders. It makes WalSndWakeup() callers' life easy.
+	 *
+	 * XXX: A desirable future improvement would be to add support for CVs
+	 * into WaitEventSetWait().
+	 *
+	 * And, we use separate shared memory CVs for physical and logical
+	 * walsenders for selective wake ups, see WalSndWakeup() for more details.
+	 */
+	if (MyWalSnd->kind == REPLICATION_KIND_PHYSICAL)
+		ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
+	else if (MyWalSnd->kind == REPLICATION_KIND_LOGICAL)
+		ConditionVariablePrepareToSleep(&WalSndCtl->wal_replay_cv);
+
 	if (WaitEventSetWait(FeBeWaitSet, timeout, &event, 1, wait_event) == 1 &&
 		(event.events & WL_POSTMASTER_DEATH))
+	{
+		ConditionVariableCancelSleep();
 		proc_exit(1);
+	}
+
+	ConditionVariableCancelSleep();
 }
 
 /*

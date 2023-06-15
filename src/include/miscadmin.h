@@ -10,7 +10,7 @@
  *	  Over time, this has also become the preferred place for widely known
  *	  resource-limitation stuff, such as work_mem and check_stack_depth().
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/miscadmin.h
@@ -263,6 +263,15 @@ extern PGDLLIMPORT double hash_mem_multiplier;
 extern PGDLLIMPORT int maintenance_work_mem;
 extern PGDLLIMPORT int max_parallel_maintenance_workers;
 
+/*
+ * Upper and lower hard limits for the buffer access strategy ring size
+ * specified by the VacuumBufferUsageLimit GUC and BUFFER_USAGE_LIMIT option
+ * to VACUUM and ANALYZE.
+ */
+#define MIN_BAS_VAC_RING_SIZE_KB 128
+#define MAX_BAS_VAC_RING_SIZE_KB (16 * 1024 * 1024)
+
+extern PGDLLIMPORT int VacuumBufferUsageLimit;
 extern PGDLLIMPORT int VacuumCostPageHit;
 extern PGDLLIMPORT int VacuumCostPageMiss;
 extern PGDLLIMPORT int VacuumCostPageDirty;
@@ -291,7 +300,7 @@ extern void PreventCommandIfReadOnly(const char *cmdname);
 extern void PreventCommandIfParallelMode(const char *cmdname);
 extern void PreventCommandDuringRecovery(const char *cmdname);
 
-/* in utils/misc/guc.c */
+/* in utils/misc/guc_tables.c */
 extern PGDLLIMPORT int trace_recovery_messages;
 extern int	trace_recovery(int trace_level);
 
@@ -310,6 +319,7 @@ extern PGDLLIMPORT char *DatabasePath;
 /* now in utils/init/miscinit.c */
 extern void InitPostmasterChild(void);
 extern void InitStandaloneProcess(const char *argv0);
+extern void InitProcessLocalLatch(void);
 extern void SwitchToSharedLatch(void);
 extern void SwitchBackToLocalLatch(void);
 
@@ -330,6 +340,8 @@ typedef enum BackendType
 	B_WAL_SENDER,
 	B_WAL_WRITER,
 } BackendType;
+
+#define BACKEND_NUM_TYPES (B_WAL_WRITER + 1)
 
 extern PGDLLIMPORT BackendType MyBackendType;
 
